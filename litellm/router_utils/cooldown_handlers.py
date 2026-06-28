@@ -66,7 +66,10 @@ def _is_cooldown_required(
             exception_status = int(exception_status)
 
         if exception_status >= 400 and exception_status < 500:
-            if exception_status == 429:
+            if exception_status == 428:
+                # Cool down 428 Precondition Required
+                return True
+            elif exception_status == 429:
                 # Cool down 429 Rate Limit Errors
                 return True
 
