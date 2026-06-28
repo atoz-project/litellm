@@ -4488,3 +4488,11 @@ class CostEstimateResponse(LiteLLMPydanticObjectBase):
     input_cost_per_token: Optional[float] = None
     output_cost_per_token: Optional[float] = None
     provider: Optional[str] = None
+
+
+class ResetCircuitBreakerResponse(BaseModel):
+    """Response model for /reset endpoint."""
+    status: str
+    message: str
+    cooldowns_cleared: int
+    failed_call_counters_cleared: int

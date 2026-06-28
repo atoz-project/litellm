@@ -15744,6 +15744,135 @@ async def get_routes():
     return {"routes": routes}
 
 
+@router.post(
+    "/reset",
+    tags=["circuit breaker"],
+    dependencies=[Depends(user_api_key_auth)],
+    response_model=ResetCircuitBreakerResponse,
+)
+async def reset_circuit_breaker(
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """
+    Reset circuit breaker cooldown state across all replicas.
+
+    Clears:
+    - Cooldown entries (deployment:{model_id}:cooldown) in both in-memory and Redis
+    - Failed call counters so allowed_fails counting restarts from zero
+
+    Authentication: Requires master key or admin role.
+
+    Useful after manual intervention (e.g., recharging credits on a provider key,
+    fixing upstream service issues).
+
+    Multi-replica behavior:
+    - Uses DualCache.delete_cache() which clears BOTH in-memory AND Redis layers
+    - All replicas will see the cleared state via shared Redis
+    - Safe for shared Redis (does NOT use flushall() which would clear rate-limit/auth data)
+    """
+    from litellm.proxy.proxy_server import llm_router, verbose_proxy_logger
+
+    # Authentication: require master key or admin role
+    if user_api_key_dict.user_role is None or (
+        user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN
+        and user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admin users can reset circuit breaker state",
+        )
+
+    if llm_router is None:
+        return ResetCircuitBreakerResponse(
+            status="ok",
+            message="Router not initialized yet — no cooldowns to clear",
+            cooldowns_cleared=0,
+            failed_call_counters_cleared=0,
+        )
+
+    cooldowns_cleared = 0
+    counters_cleared = 0
+
+    # Clear cooldown entries from DualCache (both in-memory and Redis)
+    cooldown_cache = getattr(llm_router, "cooldown_cache", None)
+    if cooldown_cache is not None:
+        dual_cache = getattr(cooldown_cache, "cache", None)
+        if dual_cache is not None:
+            # Iterate all deployments and delete their cooldown keys
+            model_list = getattr(llm_router, "model_list", [])
+            for model_dict in model_list:
+                model_info = model_dict.get("model_info", )
+                model_id = model_info.get("id")
+                if model_id:
+                    cooldown_key = f"deployment:{model_id}:cooldown"
+                    try:
+                        await dual_cache.async_delete_cache(key=cooldown_key)
+                        cooldowns_cleared += 1
+                    except Exception as e:
+                        verbose_proxy_logger.warning(
+                            f"Failed to clear cooldown key {cooldown_key}: {e}"
+                        )
+
+        # Also clear CooldownCache's own InMemoryCache layer
+        own_mem = getattr(cooldown_cache, "in_memory_cache", None)
+        if own_mem is not None:
+            try:
+                own_mem.flush_cache()
+            except Exception as e:
+                verbose_proxy_logger.warning(
+                    f"Failed to flush CooldownCache in_memory_cache: {e}"
+                )
+
+    # Clear failed_calls counters
+    failed_calls = getattr(llm_router, "failed_calls", None)
+    if failed_calls is not None:
+        dual_cache_fc = getattr(failed_calls, "cache", None)
+        if dual_cache_fc is not None:
+            model_list = getattr(llm_router, "model_list", [])
+            for model_dict in model_list:
+                model_info = model_dict.get("model_info", {})
+                model_id = model_info.get("id")
+                if model_id:
+                    try:
+                        await dual_cache_fc.async_delete_cache(key=model_id)
+                        counters_cleared += 1
+                    except Exception as e:
+                        verbose_proxy_logger.warning(
+                            f"Failed to clear failed_calls counter for {model_id}: {e}"
+                        )
+        else:
+            in_mem_fc = getattr(failed_calls, "in_memory_cache", failed_calls)
+            if in_mem_fc is not None:
+                try:
+                    in_mem_fc.flush_cache()
+                    counters_cleared = len(getattr(llm_router, "model_list", []))
+                except Exception as e:
+                    verbose_proxy_logger.warning(
+                        f"Failed to flush failed_calls cache: {e}"
+                    )
+
+    return ResetCircuitBreakerResponse(
+        status="ok",
+        message="Circuit breaker state reset — all deployments reactivated",
+        cooldowns_cleared=cooldowns_cleared,
+        failed_call_counters_cleared=counters_cleared,
+    )
+
+
+@router.post(
+    "/circuit/reset",
+    tags=["circuit breaker"],
+    dependencies=[Depends(user_api_key_auth)],
+    response_model=ResetCircuitBreakerResponse,
+    include_in_schema=False,
+)
+async def circuit_reset_alias(
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """Alias for /reset endpoint to maintain compatibility with external routing."""
+    return await reset_circuit_breaker(user_api_key_dict=user_api_key_dict)
+
+
 #### TEST ENDPOINTS ####
 # @router.get(
 #     "/token/generate",
