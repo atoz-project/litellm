@@ -113,6 +113,42 @@ class FakeAnthropicMessagesStreamIterator:
             }
             chunks.append(f"event: content_block_delta\ndata: {json.dumps(content_block_delta)}\n\n".encode())
 
+        elif block_type == "server_tool_use":
+            # Server-side tool use (e.g. Anthropic web_search). The input is
+            # known up front, so emit it entirely in content_block_start with
+            # no delta — mirrors how redacted_thinking is streamed above.
+            content_block_start = {
+                "type": "content_block_start",
+                "index": index,
+                "content_block": {
+                    "type": "server_tool_use",
+                    "id": block_dict.get("id"),
+                    "name": block_dict.get("name"),
+                    "input": block_dict.get("input", {}),
+                },
+            }
+            chunks.append(
+                f"event: content_block_start\ndata: {json.dumps(content_block_start)}\n\n".encode()
+            )
+
+        elif block_type == "web_search_tool_result":
+            # Search results paired with a server_tool_use above. Claude Code's
+            # WebSearchTool reads this block to count/extract results; without
+            # this branch the FakeStreamIterator would only emit a lone
+            # content_block_stop and the client would see "Did 0 searches".
+            content_block_start = {
+                "type": "content_block_start",
+                "index": index,
+                "content_block": {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": block_dict.get("tool_use_id"),
+                    "content": block_dict.get("content", []),
+                },
+            }
+            chunks.append(
+                f"event: content_block_start\ndata: {json.dumps(content_block_start)}\n\n".encode()
+            )
+
         content_block_stop = {"type": "content_block_stop", "index": index}
         chunks.append(f"event: content_block_stop\ndata: {json.dumps(content_block_stop)}\n\n".encode())
         return chunks

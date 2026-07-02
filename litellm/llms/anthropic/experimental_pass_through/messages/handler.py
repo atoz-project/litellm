@@ -236,6 +236,14 @@ async def anthropic_messages(
     from litellm.integrations.anthropic_cache_control_hook import (
         AnthropicCacheControlHook,
     )
+    # Save the original (native) tools before _execute_pre_request_hooks
+    # converts them to LiteLLM standard (litellm_web_search). The web-search
+    # short-circuit below must see the native web_search_* tool to build the
+    # Anthropic-native server_tool_use + web_search_tool_result blocks that
+    # Claude Code's WebSearchTool parses for results — if it sees the converted
+    # standard tool, native_tool is None and it only emits a text block, which
+    # Claude Code renders as "Did 0 searches".
+    original_tools = tools
 
     messages, system = AnthropicCacheControlHook.maybe_inject_cache_control(
         messages, system, kwargs, model=model, custom_llm_provider=custom_llm_provider, tools=tools
@@ -294,7 +302,7 @@ async def anthropic_messages(
     short_circuit_response = await _try_websearch_short_circuit(
         model=model,
         messages=messages,
-        tools=tools,
+        tools=original_tools,  # native tools → native_tool != None → native blocks
         custom_llm_provider=custom_llm_provider,
         stream=original_stream,
         kwargs={**kwargs, "metadata": metadata},
