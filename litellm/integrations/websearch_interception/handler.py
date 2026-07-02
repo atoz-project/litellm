@@ -104,6 +104,7 @@ class WebSearchInterceptionLogger(CustomLogger):
         tools: Optional[List[Dict]],
         custom_llm_provider: Optional[str],
         kwargs: Optional[dict[str, Any]] = None,
+        emit_native_blocks: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
         Short-circuit web-search-only requests by executing the search directly.
@@ -211,9 +212,16 @@ class WebSearchInterceptionLogger(CustomLogger):
             search_result_text, structured = f"Search failed: {e}", None
 
         content: List[Dict[str, Any]] = []
-        if native_tool is not None:
+        # Build native blocks if the *original* request carried a native
+        # web_search_* tool (emit_native_blocks flag set by the deployment /
+        # pre-request hooks BEFORE they converted it to litellm_web_search),
+        # or if a native tool is still present in `tools`. The flag is the
+        # reliable signal here because async_pre_call_deployment_hook runs
+        # before anthropic_messages and converts the tool, so `tools` at this
+        # point is the LiteLLM standard form and native_tool would be None.
+        if emit_native_blocks or native_tool is not None:
             tool_use_id = f"srvtoolu_{uuid.uuid4().hex}"
-            tool_name = native_tool.get("name") or "web_search"
+            tool_name = (native_tool.get("name") if native_tool else "web_search") or "web_search"
             content.append(
                 {
                     "type": "server_tool_use",

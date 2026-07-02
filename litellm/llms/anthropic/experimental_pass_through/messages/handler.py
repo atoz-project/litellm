@@ -150,6 +150,7 @@ async def _try_websearch_short_circuit(
     custom_llm_provider: Optional[str],
     stream: Optional[bool],
     kwargs: Optional[dict] = None,
+    emit_native_blocks: bool = False,
 ) -> Optional[Union[AnthropicMessagesResponse, AsyncIterator]]:
     """
     Attempt to short-circuit a web-search-only request.
@@ -167,6 +168,7 @@ async def _try_websearch_short_circuit(
         return None
 
     from litellm.integrations.websearch_interception.handler import (
+        WEBSEARCH_EMIT_NATIVE_BLOCKS_KEY,
         WebSearchInterceptionLogger,
     )
 
@@ -180,6 +182,7 @@ async def _try_websearch_short_circuit(
             tools=tools,
             custom_llm_provider=custom_llm_provider,
             kwargs=kwargs,
+            emit_native_blocks=emit_native_blocks,
         )
         if response is not None:
             anthropic_response = cast(AnthropicMessagesResponse, response)
@@ -302,10 +305,16 @@ async def anthropic_messages(
     short_circuit_response = await _try_websearch_short_circuit(
         model=model,
         messages=messages,
-        tools=original_tools,  # native tools → native_tool != None → native blocks
+        tools=original_tools,
         custom_llm_provider=custom_llm_provider,
         stream=original_stream,
         kwargs={**kwargs, "metadata": metadata},
+        # The deployment hook runs before anthropic_messages and converts the
+        # native web_search_* tool to litellm_web_search while setting this
+        # flag. Pass it through so the short-circuit still emits Anthropic-native
+        # server_tool_use + web_search_tool_result blocks (Claude Code parses
+        # those for results) despite the tool conversion.
+        emit_native_blocks=bool(kwargs.get(WEBSEARCH_EMIT_NATIVE_BLOCKS_KEY, False)),
     )
     if short_circuit_response is not None:
         return short_circuit_response
