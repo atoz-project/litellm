@@ -168,7 +168,6 @@ async def _try_websearch_short_circuit(
         return None
 
     from litellm.integrations.websearch_interception.handler import (
-        WEBSEARCH_EMIT_NATIVE_BLOCKS_KEY,
         WebSearchInterceptionLogger,
     )
 
@@ -311,10 +310,14 @@ async def anthropic_messages(
         kwargs={**kwargs, "metadata": metadata},
         # The deployment hook runs before anthropic_messages and converts the
         # native web_search_* tool to litellm_web_search while setting this
-        # flag. Pass it through so the short-circuit still emits Anthropic-native
-        # server_tool_use + web_search_tool_result blocks (Claude Code parses
-        # those for results) despite the tool conversion.
-        emit_native_blocks=bool(kwargs.get(WEBSEARCH_EMIT_NATIVE_BLOCKS_KEY, False)),
+        # flag (key literal = WEBSEARCH_EMIT_NATIVE_BLOCKS_KEY in
+        # websearch_interception/handler.py; inlined here to avoid a function-
+        # scope import that wouldn't be visible at this call site — that caused
+        # a NameError 500 on every /v1/messages request). Pass it through so
+        # the short-circuit still emits Anthropic-native server_tool_use +
+        # web_search_tool_result blocks (Claude Code parses those for results)
+        # despite the tool conversion.
+        emit_native_blocks=bool(kwargs.get("_websearch_interception_emit_native_blocks", False)),
     )
     if short_circuit_response is not None:
         return short_circuit_response
