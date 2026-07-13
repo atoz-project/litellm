@@ -21,3 +21,9 @@ class WebSearchInterceptionConfig(TypedDict, total=False):
 
     search_tool_name: Optional[str]
     """Name of search tool configured in router's search_tools. If None, uses first available."""
+
+    enabled_models: Optional[List[str]]
+    """Optional list of model names to restrict short-circuit to. If None, ALL models
+    are eligible (provider filter still applies). Match is exact string equality against
+    the request's model name, which at this hook is the deployment name (router-rewritten,
+    e.g. 'openai/glm-5.2'), NOT the request model name (e.g. 'round-robin/glm-5.2')."""

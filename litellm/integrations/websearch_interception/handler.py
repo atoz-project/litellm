@@ -66,6 +66,7 @@ class WebSearchInterceptionLogger(CustomLogger):
         self,
         enabled_providers: Optional[List[Union[LlmProviders, str]]] = None,
         search_tool_name: Optional[str] = None,
+        enabled_models: Optional[List[str]] = None,
     ):
         """
         Args:
@@ -75,6 +76,13 @@ class WebSearchInterceptionLogger(CustomLogger):
                               Default: None (all providers enabled)
             search_tool_name: Name of search tool configured in router's search_tools.
                              If None, will attempt to use first available search tool.
+            enabled_models: Optional list of model names to restrict short-circuit to
+                           (exact match against the request model). If None, ALL models
+                           are eligible (provider filter still applies). Useful when a
+                           provider serves multiple models and only some should
+                           short-circuit web search. NOTE: match is against the
+                           deployment name (router-rewritten, e.g. "openai/glm-5.2"),
+                           NOT the request model name (e.g. "round-robin/glm-5.2").
         """
         super().__init__()
         # Convert enum values to strings for comparison
@@ -83,6 +91,7 @@ class WebSearchInterceptionLogger(CustomLogger):
         else:
             self.enabled_providers = [p.value if isinstance(p, LlmProviders) else p for p in enabled_providers]
         self.search_tool_name = search_tool_name
+        self.enabled_models = enabled_models
         self._request_has_websearch = False  # Track if current request has web search
 
     async def try_short_circuit_search(
@@ -119,6 +128,19 @@ class WebSearchInterceptionLogger(CustomLogger):
         # Check if provider is in enabled list
         provider_str = custom_llm_provider or ""
         if self.enabled_providers is not None and provider_str not in self.enabled_providers:
+            return None
+
+        # Check if model is in enabled list (when model filtering is configured,
+        # short-circuit only for explicitly listed models; None = all models
+        # eligible per the provider filter above). NOTE: `model` here is the
+        # deployment name (router-rewritten, e.g. "openai/glm-5.2"), NOT the
+        # request model name (e.g. "round-robin/glm-5.2") — config must list
+        # deployment names, otherwise the synthetic short-circuit is skipped
+        # silently and requests fall through to the agentic loop.
+        if (
+            self.enabled_models is not None
+            and model not in self.enabled_models
+        ):
             return None
 
         # Only short-circuit for providers whose Anthropic Messages agentic loop
@@ -316,6 +338,7 @@ class WebSearchInterceptionLogger(CustomLogger):
         # Extract parameters from config
         enabled_providers_str = config.get("enabled_providers", None)
         search_tool_name = config.get("search_tool_name", None)
+        enabled_models = config.get("enabled_models", None)
 
         # Convert string provider names to LlmProviders enum values
         enabled_providers: Optional[List[Union[LlmProviders, str]]] = None
@@ -333,6 +356,7 @@ class WebSearchInterceptionLogger(CustomLogger):
         return cls(
             enabled_providers=enabled_providers,
             search_tool_name=search_tool_name,
+            enabled_models=enabled_models,
         )
 
     @staticmethod
