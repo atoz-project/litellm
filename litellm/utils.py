@@ -8857,6 +8857,9 @@ class ProviderConfigManager:
         """
         Get Search configuration for a given provider.
         """
+        from litellm.llms.aliyun_iqs.search.transformation import (
+            AliyunIQSSearchConfig,
+        )
         from litellm.llms.apiserpent.search.transformation import (
             APISerpentSearchConfig,
         )
@@ -8897,6 +8900,7 @@ class ProviderConfigManager:
             SearchProviders.YOU_COM: YouComSearchConfig,
             SearchProviders.APISERPENT: APISerpentSearchConfig,
             SearchProviders.TINYFISH: TinyfishSearchConfig,
+            SearchProviders.ALIYUN_IQS: AliyunIQSSearchConfig,
         }
         config_class = PROVIDER_TO_CONFIG_MAP.get(provider, None)
         if config_class is None:
