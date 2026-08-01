@@ -105,7 +105,7 @@ class WebSearchInterceptionLogger(CustomLogger):
         self.enabled_models = enabled_models
         self._request_has_websearch = False  # Track if current request has web search
 
-    def _is_model_enabled(self, model: str) -> bool:
+    def _is_model_enabled(self, model: str, custom_llm_provider: Optional[str] = None) -> bool:
         """
         Boundary-aware prefix match of ``model`` against ``enabled_models``.
 
@@ -116,11 +116,22 @@ class WebSearchInterceptionLogger(CustomLogger):
         ``openai/glm-5.2`` from also matching the distinct model
         ``openai/glm-5.20``. An empty/missing model never matches a non-None
         list, i.e. fails closed (no interception, no search spend).
+
+        ``custom_llm_provider``: some hook surfaces (e.g. the chat-completions
+        agentic loop in main.py) receive the model AFTER get_llm_provider()
+        has stripped the provider prefix ("glm-5.2", not "openai/glm-5.2").
+        When given and ``model`` has no "/", the reconstructed deployment name
+        "<provider>/<model>" is matched as an additional candidate so config
+        keeps listing deployment names only.
         """
         if self.enabled_models is None:
             return True
+        candidates = [model]
+        if custom_llm_provider and "/" not in model:
+            candidates.append(f"{custom_llm_provider}/{model}")
         return any(
-            model == entry or (model.startswith(entry) and model[len(entry)] == "-")
+            candidate == entry or (candidate.startswith(entry) and candidate[len(entry)] == "-")
+            for candidate in candidates
             for entry in self.enabled_models
         )
 
@@ -580,8 +591,9 @@ class WebSearchInterceptionLogger(CustomLogger):
             return False, {}
 
         # Per-model gate: exempt models never enter the agentic loop
-        # (prefix match; see _is_model_enabled).
-        if not self._is_model_enabled(model):
+        # (prefix match; see _is_model_enabled). custom_llm_provider is passed
+        # so surfaces that see a prefix-stripped bare model still match.
+        if not self._is_model_enabled(model, custom_llm_provider):
             verbose_logger.debug(
                 f"WebSearchInterception: Skipping model {model} (not in enabled_models)"
             )
@@ -682,7 +694,10 @@ class WebSearchInterceptionLogger(CustomLogger):
             return False, {}
 
         # Per-model gate (prefix match; see _is_model_enabled).
-        if not self._is_model_enabled(model):
+        # custom_llm_provider is passed because this surface (main.py
+        # acompletion) receives the model AFTER get_llm_provider() stripped
+        # the provider prefix — the whitelist lists deployment names.
+        if not self._is_model_enabled(model, custom_llm_provider):
             verbose_logger.debug(
                 f"WebSearchInterception: Skipping model {model} (not in enabled_models)"
             )
@@ -740,7 +755,7 @@ class WebSearchInterceptionLogger(CustomLogger):
             return False, {}
 
         # Per-model gate (prefix match; see _is_model_enabled).
-        if not self._is_model_enabled(model):
+        if not self._is_model_enabled(model, custom_llm_provider):
             verbose_logger.debug(
                 f"WebSearchInterception: Skipping model {model} (not in enabled_models)"
             )

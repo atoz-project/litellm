@@ -69,6 +69,18 @@ class TestIsModelEnabled:
     def test_empty_list_enables_nothing(self):
         assert _logger([])._is_model_enabled(ENABLED_MODEL) is False
 
+    def test_bare_model_reconstructed_with_provider(self):
+        """Surfaces past get_llm_provider() see the prefix-stripped model
+        ("glm-5.2"); with the provider passed, the reconstructed deployment
+        name "openai/glm-5.2" must match the whitelist."""
+        logger = _logger()
+        assert logger._is_model_enabled("glm-5.2", "openai") is True
+        assert logger._is_model_enabled("qwen3.7-max-2026-06-08", "openai") is False
+
+    def test_bare_model_without_provider_stays_disabled(self):
+        """No provider → no reconstruction → bare model fails closed."""
+        assert _logger()._is_model_enabled("glm-5.2") is False
+
 
 # ---------------------------------------------------------------------------
 # Gate 1: try_short_circuit_search
@@ -307,6 +319,26 @@ class TestChatCompletionShouldRunGate:
         should_run, tools_dict = await logger.async_should_run_chat_completion_agentic_loop(
             response=self._response_with_tool_call(),
             model=ENABLED_MODEL,
+            messages=[{"role": "user", "content": "weather?"}],
+            tools=self.OPENAI_TOOLS,
+            stream=False,
+            custom_llm_provider="openai",
+            kwargs={},
+        )
+        assert should_run is True
+        assert len(tools_dict["tool_calls"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_enabled_model_enters_loop_with_bare_model_name(self):
+        """Regression: main.py's acompletion passes the model AFTER
+        get_llm_provider() stripped the provider prefix ("glm-5.2"). The gate
+        must reconstruct "openai/glm-5.2" via custom_llm_provider and still
+        enter the loop — otherwise the converted litellm_web_search tool_use
+        leaks to the client unanswered."""
+        logger = _logger()
+        should_run, tools_dict = await logger.async_should_run_chat_completion_agentic_loop(
+            response=self._response_with_tool_call(),
+            model="glm-5.2",  # bare, prefix-stripped
             messages=[{"role": "user", "content": "weather?"}],
             tools=self.OPENAI_TOOLS,
             stream=False,
