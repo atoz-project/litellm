@@ -79,13 +79,21 @@ class WebSearchInterceptionLogger(CustomLogger):
                               Default: None (all providers enabled)
             search_tool_name: Name of search tool configured in router's search_tools.
                              If None, will attempt to use first available search tool.
-            enabled_models: Optional list of model names to restrict short-circuit to
-                           (exact match against the request model). If None, ALL models
-                           are eligible (provider filter still applies). Useful when a
-                           provider serves multiple models and only some should
-                           short-circuit web search. NOTE: match is against the
-                           deployment name (router-rewritten, e.g. "openai/glm-5.2"),
-                           NOT the request model name (e.g. "round-robin/glm-5.2").
+            enabled_models: Optional list of model-name prefixes gating ALL
+                           interception paths (tool conversion, short-circuit,
+                           and every agentic-loop entry). A model is enabled
+                           when it equals an entry or starts with it followed
+                           by "-" (boundary-aware prefix; see
+                           _is_model_enabled); if None, ALL models are
+                           eligible (provider filter still applies).
+                           Models that don't match are fully exempt — no tool
+                           conversion, no short-circuit, no agentic loop.
+                           NOTE: match is against the deployment name
+                           (router-rewritten, e.g. "openai/glm-5.2"), NOT the
+                           request model name (e.g. "round-robin/glm-5.2").
+                           Prefix matching means "openai/qwen3.7-max" also
+                           covers "openai/qwen3.7-max-2026-06-08" snapshot
+                           deployments.
         """
         super().__init__()
         # Convert enum values to strings for comparison
@@ -96,6 +104,25 @@ class WebSearchInterceptionLogger(CustomLogger):
         self.search_tool_name = search_tool_name
         self.enabled_models = enabled_models
         self._request_has_websearch = False  # Track if current request has web search
+
+    def _is_model_enabled(self, model: str) -> bool:
+        """
+        Boundary-aware prefix match of ``model`` against ``enabled_models``.
+
+        ``enabled_models is None`` → every model enabled. Otherwise the model
+        must equal an entry, or start with it followed by ``-`` (the snapshot
+        suffix convention, e.g. entry ``openai/qwen3.7-max`` covers
+        ``openai/qwen3.7-max-2026-06-08``). The ``-`` boundary keeps
+        ``openai/glm-5.2`` from also matching the distinct model
+        ``openai/glm-5.20``. An empty/missing model never matches a non-None
+        list, i.e. fails closed (no interception, no search spend).
+        """
+        if self.enabled_models is None:
+            return True
+        return any(
+            model == entry or (model.startswith(entry) and model[len(entry)] == "-")
+            for entry in self.enabled_models
+        )
 
     async def try_short_circuit_search(
         self,
@@ -134,17 +161,13 @@ class WebSearchInterceptionLogger(CustomLogger):
         if self.enabled_providers is not None and provider_str not in self.enabled_providers:
             return None
 
-        # Check if model is in enabled list (when model filtering is configured,
-        # short-circuit only for explicitly listed models; None = all models
-        # eligible per the provider filter above). NOTE: `model` here is the
-        # deployment name (router-rewritten, e.g. "openai/glm-5.2"), NOT the
-        # request model name (e.g. "round-robin/glm-5.2") — config must list
-        # deployment names, otherwise the synthetic short-circuit is skipped
-        # silently and requests fall through to the agentic loop.
-        if (
-            self.enabled_models is not None
-            and model not in self.enabled_models
-        ):
+        # Check if model is enabled (prefix match; None = all models eligible
+        # per the provider filter above). NOTE: `model` here is the deployment
+        # name (router-rewritten, e.g. "openai/glm-5.2"), NOT the request
+        # model name (e.g. "round-robin/glm-5.2") — config must list
+        # deployment-name prefixes, otherwise the synthetic short-circuit is
+        # skipped silently and requests fall through to the agentic loop.
+        if not self._is_model_enabled(model):
             return None
 
         # Only short-circuit for providers whose Anthropic Messages agentic loop
@@ -277,6 +300,12 @@ class WebSearchInterceptionLogger(CustomLogger):
             except Exception:
                 custom_llm_provider = ""
         if custom_llm_provider not in self.enabled_providers:
+            return None
+
+        # Per-model gate: models outside enabled_models are fully exempt — no
+        # tool conversion, no stream downgrade, no native-block flagging
+        # (prefix match against the deployment name; see _is_model_enabled).
+        if not self._is_model_enabled(kwargs.get("model", "")):
             return None
 
         # Check if request has tools with native web_search
@@ -449,6 +478,14 @@ class WebSearchInterceptionLogger(CustomLogger):
             )
             return None
 
+        # Per-model gate: exempt models keep their native web_search tools
+        # untouched (prefix match; see _is_model_enabled).
+        if not self._is_model_enabled(model):
+            verbose_logger.debug(
+                f"WebSearchInterception: Skipping - model {model} not in enabled_models"
+            )
+            return None
+
         # Check if request has tools
         tools = kwargs.get("tools")
         if not tools:
@@ -539,6 +576,14 @@ class WebSearchInterceptionLogger(CustomLogger):
         if self.enabled_providers is not None and custom_llm_provider not in self.enabled_providers:
             verbose_logger.debug(
                 f"WebSearchInterception: Skipping provider {custom_llm_provider} (not in enabled list: {self.enabled_providers})"
+            )
+            return False, {}
+
+        # Per-model gate: exempt models never enter the agentic loop
+        # (prefix match; see _is_model_enabled).
+        if not self._is_model_enabled(model):
+            verbose_logger.debug(
+                f"WebSearchInterception: Skipping model {model} (not in enabled_models)"
             )
             return False, {}
 
@@ -636,6 +681,13 @@ class WebSearchInterceptionLogger(CustomLogger):
             )
             return False, {}
 
+        # Per-model gate (prefix match; see _is_model_enabled).
+        if not self._is_model_enabled(model):
+            verbose_logger.debug(
+                f"WebSearchInterception: Skipping model {model} (not in enabled_models)"
+            )
+            return False, {}
+
         # Check if tools include any web search tool (strict check for chat completions)
         has_websearch_tool = any(is_web_search_tool_chat_completion(t) for t in (tools or []))
         if not has_websearch_tool:
@@ -684,6 +736,13 @@ class WebSearchInterceptionLogger(CustomLogger):
         if self.enabled_providers is not None and custom_llm_provider not in self.enabled_providers:
             verbose_logger.debug(
                 f"WebSearchInterception: Skipping provider {custom_llm_provider} (not in enabled list: {self.enabled_providers})"
+            )
+            return False, {}
+
+        # Per-model gate (prefix match; see _is_model_enabled).
+        if not self._is_model_enabled(model):
+            verbose_logger.debug(
+                f"WebSearchInterception: Skipping model {model} (not in enabled_models)"
             )
             return False, {}
 

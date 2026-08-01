@@ -23,7 +23,13 @@ class WebSearchInterceptionConfig(TypedDict, total=False):
     """Name of search tool configured in router's search_tools. If None, uses first available."""
 
     enabled_models: Optional[List[str]]
-    """Optional list of model names to restrict short-circuit to. If None, ALL models
-    are eligible (provider filter still applies). Match is exact string equality against
-    the request's model name, which at this hook is the deployment name (router-rewritten,
-    e.g. 'openai/glm-5.2'), NOT the request model name (e.g. 'round-robin/glm-5.2')."""
+    """Optional list of model-name prefixes gating ALL interception paths (tool
+    conversion, short-circuit, and every agentic-loop entry). A model is enabled
+    when it equals an entry or starts with it followed by '-' (boundary-aware
+    prefix); if None, ALL models are eligible (provider filter still applies).
+    Non-matching models are fully exempt.
+    Match is against the deployment name (router-rewritten, e.g.
+    'openai/glm-5.2'), NOT the request model name (e.g. 'round-robin/glm-5.2').
+    Prefix matching covers snapshot suffixes: 'openai/qwen3.7-max' also matches
+    'openai/qwen3.7-max-2026-06-08' (but 'openai/glm-5.2' does not match the
+    distinct model 'openai/glm-5.20')."""
