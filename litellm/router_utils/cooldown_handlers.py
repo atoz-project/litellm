@@ -26,25 +26,31 @@ from .router_callbacks.track_deployment_metrics import (
 )
 
 # ---------------------------------------------------------------------------
-# custom-aigw: periodic-quota 403 -> immediate long cooldown.
+# custom-aigw: periodic-quota errors -> immediate long cooldown.
 # Upstream hard-excludes 403 from cooldown (only 401/404/408/428/429 of 4xx are
 # cooled), so a deployment whose key exhausted a PERIODIC quota (Kimi Code weekly
-# billing cycle) keeps being re-picked by simple-shuffle; every pick is a wasted
-# in-group retry, and surfaced 403s once retries exhaust. Periodic quota does not
-# recover in seconds, so cool immediately with a long TTL floor; after the TTL a
-# single probe re-tries the key, which also self-heals once the window resets.
-# Text-only match: the marker phrase only appears on periodic-quota errors, so
-# plain permission 403s (bad key, missing scope) are never cooled by this path.
+# billing cycle) keeps being re-picked by simple-shuffle; every pick burns an
+# in-group retry, and errors surface once retries exhaust. Periodic quota does
+# not recover in seconds, so cool immediately with a long TTL floor; after the
+# TTL a single probe re-tries the key, which also self-heals on window reset.
+#
+# Match is TEXT-ONLY and status-agnostic: the anthropic exception mapper has no
+# 403 branch (exception_mapping_utils._map_anthropic_exception), so Kimi's
+# weekly-quota 403 falls through to a generic APIConnectionError(status 500)
+# with the upstream body embedded in the message — and APIConnectionError is on
+# the no-cooldown veto list below. The marker phrase only ever appears on
+# periodic-quota errors, so plain permission 403s (bad key/scope) and transient
+# connection blips never match.
 # ---------------------------------------------------------------------------
-PERIODIC_QUOTA_403_COOLDOWN_SECONDS = 6 * 60 * 60
-_PERIODIC_QUOTA_403_MARKERS = ("usage limit for this billing cycle",)
+PERIODIC_QUOTA_COOLDOWN_SECONDS = 6 * 60 * 60
+_PERIODIC_QUOTA_MARKERS = ("usage limit for this billing cycle",)
 
 
-def _is_periodic_quota_403(exception_status: Union[str, int], exception_str: Optional[str]) -> bool:
-    if cast_exception_status_to_int(exception_status) != 403 or not exception_str:
+def _is_periodic_quota_error(exception_str: Optional[str]) -> bool:
+    if not exception_str:
         return False
     s = exception_str.lower()
-    return any(m in s for m in _PERIODIC_QUOTA_403_MARKERS)
+    return any(m in s for m in _PERIODIC_QUOTA_MARKERS)
 
 if TYPE_CHECKING:
     from opentelemetry.trace import Span as _Span
@@ -79,7 +85,9 @@ def _is_cooldown_required(
         if exception_str is not None:  # don't cooldown on litellm api connection errors errors
             for ignored_string in ignored_strings:
                 if ignored_string in exception_str:
-                    return False
+                    # custom-aigw: periodic quota is multi-day, not a transient
+                    # blip — the APIConnectionError veto must not suppress it.
+                    return _is_periodic_quota_error(exception_str)
 
         if isinstance(exception_status, str):
             if len(exception_status) == 0:
@@ -104,7 +112,7 @@ def _is_cooldown_required(
             elif exception_status == 404:
                 return True
 
-            elif exception_status == 403 and _is_periodic_quota_403(exception_status, exception_str):
+            elif exception_status == 403 and _is_periodic_quota_error(exception_str):
                 # custom-aigw: cool down periodic-quota 403 (Kimi Code weekly billing cycle)
                 return True
 
@@ -293,10 +301,10 @@ def _set_cooldown_deployments(
     exception_status_int = cast_exception_status_to_int(exception_status)
     verbose_router_logger.debug(f"Attempting to add {deployment} to cooldown list")
 
-    if _is_periodic_quota_403(exception_status_int, str(original_exception)):
-        # custom-aigw: periodic-quota 403 bypasses fail-count policy (weekly quota
-        # recovers in days, not after N minutes of probing) and floors the TTL.
-        time_to_cooldown = max(time_to_cooldown or 0, PERIODIC_QUOTA_403_COOLDOWN_SECONDS)
+    if _is_periodic_quota_error(str(original_exception)):
+        # custom-aigw: periodic-quota errors bypass fail-count policy (weekly quota
+        # recovers in days, not after N minutes of probing) and floor the TTL.
+        time_to_cooldown = max(time_to_cooldown or 0, PERIODIC_QUOTA_COOLDOWN_SECONDS)
         should_cooldown = True
     else:
         should_cooldown = _should_cooldown_deployment(
