@@ -5,13 +5,21 @@ Covers the /v1/messages (Anthropic-format) path:
   pre_call_hook is called with call_type='anthropic_messages' from
   litellm/proxy/common_request_processing.py:963.
 
-Logic mirrors the existing Lua plugin-fixed.lua:
+Logic mirrors the existing APIG Lua plugin
+(backups/2026-06-21-round-robin-glm52-empty-tool-input/plugin-fixed.lua):
   For every message whose content blocks contain a tool_use block where
   input is None / not-a-dict / empty-dict, normalise to {'_': ''}.
 
-Only activates when:
-  1. call_type == 'anthropic_messages'   (Anthropic /v1/messages path)
-  2. data['model'] has the configured prefix (default 'glm')
+Only activates when BOTH hold (matching the Lua guard exactly):
+  1. call_type == 'anthropic_messages'         (Anthropic /v1/messages path)
+  2. data['model'] starts with 'round-robin/glm-'
+
+The model guard is deliberately the precise 'round-robin/glm-' prefix — NOT a
+broad 'glm' substring. In APIG the Lua plugin is attached ONLY to the
+round-robin Anthropic router and gates on `string.sub(model,1,#'round-robin/glm-')`.
+Other GLM-bearing routes (aliyun-security/glm-5.1, aliyun-apt/glm-5.1, …) go
+through routers WITHOUT this plugin and must NOT be normalised, or litellm would
+diverge from APIG and mutate traffic the gateway leaves untouched.
 """
 
 from __future__ import annotations
@@ -27,7 +35,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-GLM_MODEL_PREFIXES = ("glm",)       # matches glm-5.2, glm-4, round-robin/glm-*, …
+# Exact APIG Lua guard: `local glm_prefix = "round-robin/glm-"` (plugin-fixed.lua:40).
+GLM_MODEL_PREFIX = "round-robin/glm-"
 TARGET_CALL_TYPE = "anthropic_messages"
 
 
@@ -64,15 +73,25 @@ def _normalize_messages(messages: list) -> bool:
 
 
 def _model_is_glm(model: Optional[str]) -> bool:
+    """
+    True only for round-robin GLM models, matching the APIG Lua guard exactly:
+        string.sub(data.model, 1, #"round-robin/glm-") == "round-robin/glm-"
+
+    Case-sensitive prefix check (the Lua does a raw byte compare). This must NOT
+    fire for aliyun-*/glm-* or bare glm-* names — those routes carry no sanitizer
+    plugin in APIG.
+    """
     if not model:
         return False
-    lowered = model.lower()
-    return any(lowered.startswith(p) or ("/" + p) in lowered for p in GLM_MODEL_PREFIXES)
+    return model.startswith(GLM_MODEL_PREFIX)
 
 
 class GlmSanitizer(CustomLogger):
     """
-    Sanitize empty tool_use.input for GLM models on the /v1/messages path.
+    Sanitize empty tool_use.input for round-robin GLM models on /v1/messages.
+
+    Fires only for model names starting with 'round-robin/glm-' and
+    call_type 'anthropic_messages', mirroring the APIG Lua plugin scope.
 
     Registration (config.yaml):
         callbacks:
