@@ -1219,6 +1219,14 @@ async def proxy_startup_event(app: FastAPI):
     if use_background_health_checks:
         asyncio.create_task(_run_background_health_check())  # start the background health check coroutine.
 
+    # custom-aigw (ADR-0004): periodic-quota sync loop — probes registry-matched
+    # deployments (Kimi) every 5min and reconciles cooldowns against the usages
+    # endpoint's authoritative resetTime. Exits immediately when nothing matches.
+    if llm_router is not None:
+        from litellm.router_utils.quota_sync import run_quota_sync_loop
+
+        asyncio.create_task(run_quota_sync_loop(llm_router))
+
     # Start adaptive-router queue flusher unconditionally — adaptive routers
     # may be added later via `/config/reload`, and the flusher is a no-op when
     # `llm_router.adaptive_routers` is empty. Per-router DB state is loaded
