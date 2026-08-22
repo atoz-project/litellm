@@ -22,8 +22,9 @@ on:
       - uv.lock
       - ui/litellm-dashboard/package-lock.json
       - .github/workflows/image-scan.yml
-  schedule:
-    - cron: "41 6 * * *"
+  # fork(custom-aigw)不跑定时扫描:上游 BerriAI/litellm 每日已扫同一份 Dockerfile/uv.lock,
+  # fork 只叠加少量补丁,重复扫描无增量信号且白烧 Actions 分钟。
+  # 保留 pull_request + workflow_dispatch(需要时手动触发)。2026-08-22 删 schedule。
   workflow_dispatch:
 
 permissions: {}
