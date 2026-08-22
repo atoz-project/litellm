@@ -31,26 +31,14 @@ from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import CallTypes
 from litellm.utils import ProviderConfigManager, client
 
-from ..adapters.handler import LiteLLMMessagesToCompletionTransformationHandler
+from ..adapters.handler import (
+    LiteLLMMessagesToCompletionTransformationHandler,
+    _should_route_openai_to_responses_api,
+)
 from ..responses_adapters.handler import LiteLLMMessagesToResponsesAPIHandler
 from ..utils import is_reasoning_auto_summary_enabled
 from .interceptors import get_messages_interceptors
 from .utils import AnthropicMessagesRequestUtils, mock_response
-
-# Providers that are routed directly to the OpenAI Responses API instead of
-# going through chat/completions.
-_RESPONSES_API_PROVIDERS: Final = frozenset({"openai"})
-
-
-def _should_route_to_responses_api(custom_llm_provider: str | None) -> bool:
-    """Return True when the provider should use the Responses API path.
-
-    Set ``litellm.use_chat_completions_url_for_anthropic_messages = True`` to
-    opt out and route OpenAI/Azure requests through chat/completions instead.
-    """
-    if litellm.use_chat_completions_url_for_anthropic_messages:
-        return False
-    return custom_llm_provider in _RESPONSES_API_PROVIDERS
 
 
 def _deployment_passes_through_anthropic_messages(model_info: object) -> bool:
@@ -230,6 +218,7 @@ async def anthropic_messages(
     from litellm.integrations.anthropic_cache_control_hook import (
         AnthropicCacheControlHook,
     )
+
     # Save the original (native) tools before _execute_pre_request_hooks
     # converts them to LiteLLM standard (litellm_web_search). The web-search
     # short-circuit below must see the native web_search_* tool to build the
@@ -549,7 +538,8 @@ def anthropic_messages_handler(
 
         anthropic_messages_provider_config = OpenAILikeAnthropicMessagesConfig()
     if anthropic_messages_provider_config is None:
-        # Route to Responses API for OpenAI / Azure, chat/completions for everything else.
+        # Route genuine OpenAI Responses deployments through Responses; custom
+        # OpenAI-compatible deployments use chat/completions.
         _shared_kwargs: Final = dict(
             max_tokens=max_tokens,
             messages=messages,
@@ -566,12 +556,16 @@ def anthropic_messages_handler(
             top_p=top_p,
             _is_async=is_async,
             api_key=api_key,
-            api_base=api_base,
+            api_base=api_base or dynamic_api_base,
             client=client,
             custom_llm_provider=custom_llm_provider,
             **kwargs,
         )
-        if _should_route_to_responses_api(custom_llm_provider):
+        if _should_route_openai_to_responses_api(
+            custom_llm_provider,
+            api_base=api_base or dynamic_api_base,
+            model_info=kwargs.get("model_info"),
+        ):
             return LiteLLMMessagesToResponsesAPIHandler.anthropic_messages_handler(**_shared_kwargs)
 
         # The in-gateway context_management polyfill runs inside

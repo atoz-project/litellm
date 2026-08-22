@@ -960,3 +960,259 @@ def test_gate_passthrough_skipped_when_only_chat_completions_supported(monkeypat
     assert result == "translated"
     assert translation_calls["count"] == 1
     assert "config" not in captured
+
+
+def _translation_target_stubs(monkeypatch):
+    """Record whether the messages bridge selected Responses or Chat Completions."""
+    from litellm.llms.anthropic.experimental_pass_through.messages import handler
+
+    dispatched = []
+
+    def fake_responses(**kwargs):
+        dispatched.append("responses")
+        return "responses-bridge"
+
+    def fake_chat_completions(**kwargs):
+        dispatched.append("chat_completions")
+        return "chat-completions-bridge"
+
+    monkeypatch.setattr(
+        handler.LiteLLMMessagesToResponsesAPIHandler,
+        "anthropic_messages_handler",
+        staticmethod(fake_responses),
+    )
+    monkeypatch.setattr(
+        handler.LiteLLMMessagesToCompletionTransformationHandler,
+        "anthropic_messages_handler",
+        staticmethod(fake_chat_completions),
+    )
+    return dispatched
+
+
+def test_openai_compatible_api_base_uses_chat_completions(monkeypatch):
+    """Custom OpenAI-compatible bases must not be sent to ``/responses``."""
+    from litellm.llms.anthropic.experimental_pass_through.messages import handler
+
+    monkeypatch.setattr(litellm, "use_chat_completions_url_for_anthropic_messages", False)
+    dispatched = _translation_target_stubs(monkeypatch)
+
+    result = handler.anthropic_messages_handler(
+        max_tokens=64,
+        messages=[{"role": "user", "content": "Hello"}],
+        model="openai/kimi-k3",
+        api_key="sk-test",
+        api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+
+    assert result == "chat-completions-bridge"
+    assert dispatched == ["chat_completions"]
+
+
+def test_openai_base_url_environment_controls_responses_capability(monkeypatch):
+    """A custom ``OPENAI_BASE_URL`` must be treated as Chat Completions-only."""
+    from litellm.llms.anthropic.experimental_pass_through.adapters.handler import (
+        _should_route_openai_to_responses_api,
+    )
+
+    monkeypatch.setattr(litellm, "use_chat_completions_url_for_anthropic_messages", False)
+    monkeypatch.setattr(litellm, "api_base", None)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+
+    assert _should_route_openai_to_responses_api("openai", api_base=None) is False
+
+
+def test_declared_responses_endpoint_keeps_responses_for_custom_base(monkeypatch):
+    """An explicit deployment capability declaration can retain Responses routing."""
+    from litellm.llms.anthropic.experimental_pass_through.messages import handler
+
+    monkeypatch.setattr(litellm, "use_chat_completions_url_for_anthropic_messages", False)
+    dispatched = _translation_target_stubs(monkeypatch)
+
+    result = handler.anthropic_messages_handler(
+        max_tokens=64,
+        messages=[{"role": "user", "content": "Hello"}],
+        model="openai/custom-responses-model",
+        api_key="sk-test",
+        api_base="https://gateway.example/v1",
+        model_info={"supported_endpoints": ["/v1/chat/completions", "/v1/responses"]},
+    )
+
+    assert result == "responses-bridge"
+    assert dispatched == ["responses"]
+
+
+def test_declared_responses_mode_keeps_responses_for_any_provider(monkeypatch):
+    """An explicit ``mode=responses`` declaration overrides provider heuristics."""
+    from litellm.llms.anthropic.experimental_pass_through.messages import handler
+
+    monkeypatch.setattr(litellm, "use_chat_completions_url_for_anthropic_messages", False)
+    dispatched = _translation_target_stubs(monkeypatch)
+
+    result = handler.anthropic_messages_handler(
+        max_tokens=64,
+        messages=[{"role": "user", "content": "Hello"}],
+        model="custom-responses-model",
+        custom_llm_provider="custom-provider",
+        api_key="sk-test",
+        api_base="https://gateway.example/v1",
+        model_info={"mode": "responses"},
+    )
+
+    assert result == "responses-bridge"
+    assert dispatched == ["responses"]
+
+
+def test_dashscope_thinking_uses_chat_completions_and_reasoning_effort(monkeypatch):
+    """DashScope Kimi K3 receives its documented Chat Completions reasoning setting."""
+    from litellm.llms.anthropic.experimental_pass_through.messages import handler
+
+    captured = {}
+
+    def fake_completion(**kwargs):
+        captured.update(kwargs)
+        return iter(())
+
+    responses = MagicMock()
+    monkeypatch.setattr(litellm, "use_chat_completions_url_for_anthropic_messages", False)
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    monkeypatch.setattr(litellm, "responses", responses)
+
+    result = handler.anthropic_messages_handler(
+        max_tokens=64,
+        messages=[{"role": "user", "content": "Hello"}],
+        model="kimi-k3",
+        custom_llm_provider="openai",
+        api_key="sk-test",
+        api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        stream=True,
+        extra_body={
+            "keep": "this",
+            "reasoning_effort": "low",
+            "thinking_budget": 512,
+            "budgetTokens": 256,
+        },
+        reasoning_effort="low",
+        thinking_budget=1024,
+        budget_tokens=1024,
+        budgetTokens=1024,
+        thinking={"type": "enabled", "budgetTokens": 1024},
+    )
+
+    assert result is not None
+    assert captured["model"] == "kimi-k3"
+    assert captured["custom_llm_provider"] == "openai"
+    assert captured["api_base"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert captured["stream"] is True
+    assert captured["extra_body"] == {"keep": "this", "reasoning_effort": "max"}
+    assert all(
+        key not in captured
+        for key in (
+            "thinking",
+            "reasoning_effort",
+            "thinking_budget",
+            "thinkingBudget",
+            "budget_tokens",
+            "budgetTokens",
+            "enable_thinking",
+        )
+    )
+    assert all(
+        key not in captured["extra_body"]
+        for key in (
+            "thinking",
+            "thinking_budget",
+            "thinkingBudget",
+            "budget_tokens",
+            "budgetTokens",
+            "enable_thinking",
+        )
+    )
+    responses.assert_not_called()
+
+
+def test_dashscope_disabled_thinking_does_not_send_false_control(monkeypatch):
+    """Kimi K3 cannot disable thinking; remove unsupported thinking controls instead."""
+    from litellm.llms.anthropic.experimental_pass_through.messages import handler
+
+    captured = {}
+
+    def fake_completion(**kwargs):
+        captured.update(kwargs)
+        return iter(())
+
+    monkeypatch.setattr(litellm, "use_chat_completions_url_for_anthropic_messages", False)
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+
+    handler.anthropic_messages_handler(
+        max_tokens=64,
+        messages=[{"role": "user", "content": "Hello"}],
+        model="kimi-k3",
+        custom_llm_provider="openai",
+        api_key="sk-test",
+        api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        stream=True,
+        extra_body={"keep": "this", "enable_thinking": False},
+        thinking={"type": "disabled"},
+    )
+
+    assert captured["extra_body"] == {"keep": "this"}
+    assert "enable_thinking" not in captured["extra_body"]
+
+
+@pytest.mark.asyncio
+async def test_dashscope_thinking_async_public_messages_path_cleans_request(monkeypatch):
+    """The public async Messages API applies the same K3 request translation."""
+    captured = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return iter(())
+
+    monkeypatch.setattr(litellm, "use_chat_completions_url_for_anthropic_messages", False)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+
+    result = await messages.acreate(
+        max_tokens=64,
+        messages=[{"role": "user", "content": "Hello"}],
+        model="kimi-k3",
+        custom_llm_provider="openai",
+        api_key="sk-test",
+        api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        stream=True,
+        extra_body={"keep": "this", "thinking_budget": 512, "budgetTokens": 256},
+        reasoning_effort="low",
+        thinking_budget=1024,
+        budgetTokens=1024,
+        thinking={"type": "enabled", "budgetTokens": 1024},
+    )
+
+    assert result is not None
+    assert captured["model"] == "kimi-k3"
+    assert captured["custom_llm_provider"] == "openai"
+    assert captured["api_base"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert captured["stream"] is True
+    assert captured["extra_body"] == {"keep": "this", "reasoning_effort": "max"}
+    assert all(
+        key not in captured
+        for key in (
+            "thinking",
+            "reasoning_effort",
+            "thinking_budget",
+            "thinkingBudget",
+            "budget_tokens",
+            "budgetTokens",
+            "enable_thinking",
+        )
+    )
+    assert all(
+        key not in captured["extra_body"]
+        for key in (
+            "thinking",
+            "thinking_budget",
+            "thinkingBudget",
+            "budget_tokens",
+            "budgetTokens",
+            "enable_thinking",
+        )
+    )

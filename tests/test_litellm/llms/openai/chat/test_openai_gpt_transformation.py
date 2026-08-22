@@ -25,6 +25,20 @@ class TestOpenAIGPTConfig:
     def setup_method(self):
         self.config = OpenAIGPTConfig()
 
+    def test_chat_completion_url_does_not_switch_to_responses(self):
+        """OpenAI-compatible K3 requests must stay on Chat Completions."""
+        url = self.config.get_complete_url(
+            api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            api_key="sk-test",
+            model="kimi-k3",
+            optional_params={"extra_body": {"reasoning_effort": "max"}},
+            litellm_params={"custom_llm_provider": "openai"},
+            stream=True,
+        )
+
+        assert url == "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+        assert not url.endswith("/responses")
+
     def test_user_param_supported_for_regular_models(self):
         """Test that 'user' param is in supported params for regular OpenAI models."""
         supported_params = self.config.get_supported_openai_params("gpt-4o")

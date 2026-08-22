@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from typing import Any, cast
@@ -14,6 +15,7 @@ from litellm.litellm_core_utils.prompt_templates.factory import (
     THOUGHT_SIGNATURE_SEPARATOR,
 )
 from litellm.llms.anthropic.experimental_pass_through.adapters.transformation import (
+    AnthropicAdapter,
     OPENAI_MAX_TOOL_NAME_LENGTH,
     LiteLLMAnthropicMessagesAdapter,
     create_tool_name_mapping,
@@ -2289,6 +2291,149 @@ def test_translate_openai_response_to_anthropic_with_reasoning_content_only():
     )
 
     assert anthropic_response.get("stop_reason") == "end_turn"
+
+
+def test_kimi_k3_nonstream_reasoning_content_becomes_thinking_block():
+    """DashScope K3 Chat Completions reasoning maps to Anthropic thinking."""
+    response = ModelResponse(
+        id="kimi-k3-response",
+        model="kimi-k3",
+        choices=[
+            Choices(
+                finish_reason="stop",
+                message=Message(
+                    role="assistant",
+                    content="final",
+                    reasoning_content="internal reasoning from kimi",
+                ),
+            )
+        ],
+        usage=Usage(prompt_tokens=1, completion_tokens=2, total_tokens=3),
+    )
+
+    result = LiteLLMAnthropicMessagesAdapter().translate_openai_response_to_anthropic(
+        response=response
+    )
+
+    assert result["content"] == [
+        {"type": "thinking", "thinking": "internal reasoning from kimi", "signature": None},
+        {"type": "text", "text": "final"},
+    ]
+    assert result["stop_reason"] == "end_turn"
+
+
+def test_kimi_k3_streaming_reasoning_delta_is_anthropic_thinking_delta():
+    """The K3 reasoning-only stream chunk opens a thinking block and emits its delta."""
+    choices = [
+        StreamingChoices(
+            finish_reason=None,
+            index=0,
+            delta=Delta(
+                reasoning_content="internal reasoning from kimi",
+                content=None,
+                role="assistant",
+                tool_calls=None,
+            ),
+        )
+    ]
+
+    block_type, content_block_start = (
+        LiteLLMAnthropicMessagesAdapter()._translate_streaming_openai_chunk_to_anthropic_content_block(
+            choices=choices
+        )
+    )
+    delta_type, content_block_delta = (
+        LiteLLMAnthropicMessagesAdapter()._translate_streaming_openai_chunk_to_anthropic(
+            choices=choices
+        )
+    )
+
+    assert (block_type, content_block_start) == (
+        "thinking",
+        {"type": "thinking", "thinking": "", "signature": ""},
+    )
+    assert (delta_type, content_block_delta) == (
+        "thinking_delta",
+        {"type": "thinking_delta", "thinking": "internal reasoning from kimi"},
+    )
+
+
+def test_kimi_k3_streaming_sse_contains_thinking_text_and_end_turn():
+    """K3 SSE preserves Anthropic event ordering across reasoning and final text."""
+    chunks = [
+        ModelResponseStream(
+            id="kimi-k3-stream",
+            created=1700000000,
+            model="kimi-k3",
+            object="chat.completion.chunk",
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=Delta(reasoning_content="internal reasoning from kimi"),
+                    finish_reason=None,
+                )
+            ],
+        ),
+        ModelResponseStream(
+            id="kimi-k3-stream",
+            created=1700000000,
+            model="kimi-k3",
+            object="chat.completion.chunk",
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=Delta(content="final"),
+                    finish_reason=None,
+                )
+            ],
+        ),
+        ModelResponseStream(
+            id="kimi-k3-stream",
+            created=1700000000,
+            model="kimi-k3",
+            object="chat.completion.chunk",
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=Delta(),
+                    finish_reason="stop",
+                )
+            ],
+            usage=Usage(prompt_tokens=1, completion_tokens=2, total_tokens=3),
+        ),
+    ]
+
+    stream = AnthropicAdapter().translate_completion_output_params_streaming(
+        completion_stream=iter(chunks),
+        model="kimi-k3",
+        is_async=False,
+    )
+    assert stream is not None
+
+    events = []
+    for raw_event in stream:
+        event_text = raw_event.decode()
+        data_line = next(line for line in event_text.splitlines() if line.startswith("data: "))
+        events.append(json.loads(data_line.removeprefix("data: ")))
+
+    assert [event["type"] for event in events] == [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+    ]
+    assert events[1]["content_block"] == {"type": "thinking", "thinking": "", "signature": ""}
+    assert events[2]["delta"] == {
+        "type": "thinking_delta",
+        "thinking": "internal reasoning from kimi",
+    }
+    assert events[5]["delta"] == {"type": "text_delta", "text": "final"}
+    assert events[7]["delta"]["stop_reason"] == "end_turn"
 
 
 # =====================================================================

@@ -5,6 +5,7 @@ from typing import (
     TypeAlias,
     cast,
 )
+from urllib.parse import urlparse
 
 from typing_extensions import TypedDict
 
@@ -22,6 +23,7 @@ from litellm.llms.anthropic.experimental_pass_through.context_management import 
 from litellm.llms.anthropic.experimental_pass_through.utils import (
     is_reasoning_auto_summary_enabled,
 )
+from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.anthropic_messages.anthropic_response import (
     AnthropicMessagesResponse,
 )
@@ -43,6 +45,103 @@ _ContextManagementSpec: TypeAlias = "dict[str, object] | list[dict[str, object]]
 class _CompletionKwargs(TypedDict, total=False, extra_items=object):
     model: str
     custom_llm_provider: str
+
+
+_RESPONSES_ENDPOINT: Final = "/v1/responses"
+_DASHSCOPE_THINKING_KEYS: Final = frozenset(
+    {
+        "thinking",
+        "thinking_budget",
+        "thinkingBudget",
+        "budget_tokens",
+        "budgetTokens",
+        "reasoning_effort",
+        "enable_thinking",
+    }
+)
+
+
+def _declared_supported_endpoints(model_info: object) -> frozenset[str] | None:
+    """Return the endpoints explicitly declared for a deployment, if usable."""
+    if not isinstance(model_info, dict):
+        return None
+    supported_endpoints: Final = model_info.get("supported_endpoints")
+    if not isinstance(supported_endpoints, (list, tuple)):
+        return None
+    return frozenset(endpoint for endpoint in supported_endpoints if isinstance(endpoint, str))
+
+
+def _effective_openai_api_base(api_base: object) -> str | None:
+    """Resolve the base URL used by the OpenAI-compatible completion handler."""
+    if isinstance(api_base, str) and api_base:
+        return api_base
+    return litellm.api_base or get_secret_str("OPENAI_BASE_URL") or get_secret_str("OPENAI_API_BASE")
+
+
+def _is_openai_native_api_base(api_base: object) -> bool:
+    """Return whether ``api_base`` points at OpenAI's own API."""
+    effective_api_base: Final = _effective_openai_api_base(api_base)
+    if not effective_api_base:
+        return True
+
+    normalized_api_base: Final = effective_api_base if "://" in effective_api_base else f"https://{effective_api_base}"
+    hostname: Final = urlparse(normalized_api_base).hostname or ""
+    return hostname == "api.openai.com" or hostname.endswith(".api.openai.com")
+
+
+def _should_route_openai_to_responses_api(
+    custom_llm_provider: str | None,
+    *,
+    api_base: object = None,
+    model_info: object = None,
+) -> bool:
+    """Return whether the deployment explicitly supports the Responses bridge."""
+    if litellm.use_chat_completions_url_for_anthropic_messages:
+        return False
+
+    declared_endpoints: Final = _declared_supported_endpoints(model_info)
+    if declared_endpoints is not None:
+        return _RESPONSES_ENDPOINT in declared_endpoints
+    if isinstance(model_info, dict) and model_info.get("mode") == "responses":
+        return True
+
+    if custom_llm_provider != "openai":
+        return False
+    return _is_openai_native_api_base(api_base)
+
+
+def _is_dashscope_compatible_mode_api_base(api_base: object) -> bool:
+    """Return whether ``api_base`` is DashScope's OpenAI-compatible endpoint."""
+    if not isinstance(api_base, str):
+        return False
+
+    normalized_api_base: Final = api_base if "://" in api_base else f"https://{api_base}"
+    parsed_api_base: Final = urlparse(normalized_api_base)
+    hostname: Final = parsed_api_base.hostname or ""
+    path: Final = parsed_api_base.path.rstrip("/")
+    is_dashscope_host: Final = hostname in {
+        "dashscope.aliyuncs.com",
+        "dashscope-intl.aliyuncs.com",
+    } or hostname.endswith(".maas.aliyuncs.com")
+    is_compatible_mode_path: Final = path in {
+        "/compatible-mode/v1",
+        "/compatible-mode/v1/chat/completions",
+    }
+    return is_dashscope_host and is_compatible_mode_path
+
+
+def _is_dashscope_kimi_k3_completion(completion_kwargs: _CompletionKwargs) -> bool:
+    """Return whether kwargs target the verified DashScope Kimi K3 adapter."""
+    if completion_kwargs.get("custom_llm_provider") != "openai":
+        return False
+    if not _is_dashscope_compatible_mode_api_base(_effective_openai_api_base(completion_kwargs.get("api_base"))):
+        return False
+
+    model: Final = completion_kwargs.get("model")
+    if not isinstance(model, str):
+        return False
+    normalized_model = model.removeprefix("responses/").removeprefix("openai/")
+    return normalized_model == "kimi-k3"
 
 
 def _messages_have_compaction_block(messages: _AnthropicMessages) -> bool:
@@ -317,6 +416,73 @@ ANTHROPIC_ADAPTER: Final = AnthropicAdapter()
 
 class LiteLLMMessagesToCompletionTransformationHandler:
     @staticmethod
+    def _should_route_openai_thinking_to_responses_api(completion_kwargs: _CompletionKwargs) -> bool:
+        """Return whether the thinking request may use the Responses bridge."""
+        custom_llm_provider = completion_kwargs.get("custom_llm_provider")
+        if custom_llm_provider is None:
+            try:
+                _, custom_llm_provider, _, _ = litellm.utils.get_llm_provider(
+                    model=cast(str, completion_kwargs.get("model"))
+                )
+            except Exception:
+                custom_llm_provider = None
+
+        return _should_route_openai_to_responses_api(
+            custom_llm_provider,
+            api_base=completion_kwargs.get("api_base"),
+            model_info=completion_kwargs.get("model_info"),
+        )
+
+    @staticmethod
+    def _translate_dashscope_thinking_to_chat_completions(
+        completion_kwargs: _CompletionKwargs,
+        *,
+        thinking: Mapping[str, object] | None,
+    ) -> None:
+        """Translate Anthropic thinking for the verified DashScope Kimi K3 path.
+
+        K3 is a thinking-only model. DashScope's documented OpenAI-compatible
+        request uses ``reasoning_effort="max"`` in ``extra_body``; Anthropic's
+        ``budget_tokens`` and a disabled-thinking control are not supported.
+        """
+        if not _is_dashscope_kimi_k3_completion(completion_kwargs):
+            return
+        if LiteLLMMessagesToCompletionTransformationHandler._should_route_openai_thinking_to_responses_api(
+            completion_kwargs
+        ):
+            return
+        if not isinstance(thinking, Mapping):
+            return
+
+        thinking_type: Final = thinking.get("type")
+        if thinking_type not in {"enabled", "adaptive", "disabled"}:
+            return
+
+        existing_extra_body: Final = completion_kwargs.get("extra_body")
+        extra_body: dict[str, object] = dict(existing_extra_body) if isinstance(existing_extra_body, Mapping) else {}
+        for key in _DASHSCOPE_THINKING_KEYS:
+            extra_body.pop(key, None)
+            completion_kwargs.pop(key, None)
+        completion_kwargs.pop("enable_thinking", None)
+
+        # K3 always thinks. Use the only documented reasoning setting when the
+        # caller requested thinking, and omit all controls for disabled thinking
+        # because DashScope cannot honor that request.
+        if thinking_type != "disabled":
+            extra_body["reasoning_effort"] = "max"
+        else:
+            extra_body.pop("reasoning_effort", None)
+
+        if extra_body:
+            completion_kwargs["extra_body"] = extra_body
+        else:
+            completion_kwargs.pop("extra_body", None)
+
+        model: Final = completion_kwargs.get("model")
+        if isinstance(model, str) and model.startswith("responses/"):
+            completion_kwargs["model"] = model[len("responses/") :]
+
+    @staticmethod
     def _route_openai_thinking_to_responses_api_if_needed(
         completion_kwargs: _CompletionKwargs,
         *,
@@ -329,9 +495,9 @@ class LiteLLMMessagesToCompletionTransformationHandler:
 
         For OpenAI models, Chat Completions typically does not return reasoning text
         (only token accounting). To return a thinking-like content block in the
-        Anthropic response format, we route the request through OpenAI's Responses API.
-        If the user provides a `summary` field in the thinking dict, it is passed
-        through to the OpenAI reasoning params (opt-in per OpenAI spec).
+        Anthropic response format, we route the request through OpenAI's Responses API
+        when the selected deployment supports it. Chat-only deployments and the
+        global Chat Completions opt-out stay on the Chat Completions path.
         """
         custom_llm_provider = completion_kwargs.get("custom_llm_provider")
         if custom_llm_provider is None:
@@ -347,6 +513,11 @@ class LiteLLMMessagesToCompletionTransformationHandler:
             return
 
         if not isinstance(thinking, dict) or thinking.get("type") != "enabled":
+            return
+
+        if not LiteLLMMessagesToCompletionTransformationHandler._should_route_openai_thinking_to_responses_api(
+            completion_kwargs
+        ):
             return
 
         model: Final = completion_kwargs.get("model")
@@ -525,6 +696,14 @@ class LiteLLMMessagesToCompletionTransformationHandler:
                 setattr(value, "stream_options", completion_kwargs.get("stream_options"))
             if key not in excluded_keys and key not in completion_kwargs and value is not None:
                 completion_kwargs[key] = value
+
+        # DashScope Kimi K3 uses a provider-specific Chat Completions
+        # reasoning setting; translate it before generic normalization so
+        # Anthropic budget aliases do not reach get_optional_params().
+        LiteLLMMessagesToCompletionTransformationHandler._translate_dashscope_thinking_to_chat_completions(
+            completion_kwargs,
+            thinking=thinking,
+        )
 
         # Normalize reasoning_effort based on model capabilities
         # (e.g. "max" → "xhigh"/"high", "minimal" → "low" if unsupported)
