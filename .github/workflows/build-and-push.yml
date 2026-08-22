@@ -16,9 +16,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -37,7 +34,10 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          # SAE 是 x86,gateway 镜像与本地 build 均 --platform linux/amd64;
+          # 不构建 arm64:QEMU 跨架构编译(rust/uv/prisma/next build)是构建耗时主因,
+          # 且无消费方(2026-08-22 砍掉,原 linux/amd64,linux/arm64)。
+          platforms: linux/amd64
           push: true
           tags: |
             ${{ secrets.ACR_REGISTRY }}/huwang/litellm:custom-aigw-${{ steps.vars.outputs.short_sha }}
