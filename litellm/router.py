@@ -223,6 +223,7 @@ from litellm.utils import (
     get_secret,
     get_utc_datetime,
     is_region_allowed,
+    provider_qualified_cost_map_key,
     set_live_deployment_replay,
 )
 
@@ -8617,7 +8618,7 @@ class Router:
     @staticmethod
     def _backend_cost_map_keys(model: str, custom_llm_provider: str | None) -> tuple[str, ...]:
         """The ``litellm.model_cost`` keys a deployment's shared backend info is registered under."""
-        backend_key: Final = model if custom_llm_provider is None else f"{custom_llm_provider}/{model}"
+        backend_key: Final = provider_qualified_cost_map_key(model=model, custom_llm_provider=custom_llm_provider)
         if "responses/" in backend_key:
             return (backend_key, backend_key.replace("responses/", ""))
         return (backend_key,)
@@ -8677,7 +8678,13 @@ class Router:
             }
 
         if model_id is not None:
-            litellm.register_model(model_cost={model_id: model_info}, persist_across_reloads=False)
+            # Keyed by deployment id, so a missing built-in entry is expected rather
+            # than actionable; the shared backend key below still reports it.
+            litellm.register_model(
+                model_cost={model_id: model_info},
+                persist_across_reloads=False,
+                warn_on_missing_builtin_entry=False,
+            )
 
         ## OLD MODEL REGISTRATION ## Kept to prevent breaking changes
         backend_keys: Final = Router._backend_cost_map_keys(model=model, custom_llm_provider=custom_llm_provider)

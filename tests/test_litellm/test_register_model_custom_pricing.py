@@ -652,3 +652,61 @@ def test_embedding_direct_sdk_custom_pricing_still_registers_shared_key():
     finally:
         litellm.model_cost.pop(model_key, None)
         _invalidate_model_cost_lowercase_map()
+
+
+def test_per_request_custom_pricing_uses_the_key_lookup_uses():
+    """The direct-SDK shared key must not double the provider prefix either.
+
+    ``_register_custom_pricing_for_request`` built ``f"{provider}/{model}"``
+    unconditionally, so a provider-prefixed model wrote pricing to
+    ``openai/openai/...`` where no cost lookup reads it.
+    """
+    from litellm.main import _register_custom_pricing_for_request
+
+    keys = ("openai/gpt-prefix-pricing-test", "openai/openai/gpt-prefix-pricing-test")
+    original_entries = _snapshot_model_cost_entries(keys)
+    try:
+        _register_custom_pricing_for_request(
+            model="openai/gpt-prefix-pricing-test",
+            custom_llm_provider="openai",
+            kwargs={"input_cost_per_token": 0.000123, "output_cost_per_token": 0.000456},
+            model_info=None,
+        )
+
+        assert "openai/openai/gpt-prefix-pricing-test" not in litellm.model_cost
+        assert litellm.model_cost["openai/gpt-prefix-pricing-test"]["input_cost_per_token"] == 0.000123
+    finally:
+        _restore_model_cost_entries(original_entries)
+
+
+def test_per_request_deployment_id_registration_stays_quiet():
+    """The per-request path also registered a deployment id as if it were a model."""
+    from unittest.mock import patch
+
+    from litellm.main import _register_custom_pricing_for_request
+
+    keys = ("openai/gpt-quiet-pricing-test", "dep-quiet-pricing-test")
+    original_entries = _snapshot_model_cost_entries(keys)
+    try:
+        with patch("litellm.utils.verbose_logger") as logger:
+            _register_custom_pricing_for_request(
+                model="openai/gpt-quiet-pricing-test",
+                custom_llm_provider="openai",
+                kwargs={
+                    "input_cost_per_token": 0.000123,
+                    "output_cost_per_token": 0.000456,
+                    "litellm_metadata": {"model_info": {"id": "dep-quiet-pricing-test"}},
+                },
+                model_info=None,
+            )
+        warned_keys = [
+            call.args[1]
+            for call in logger.warning.call_args_list
+            if call.args and "not in built-in cost map" in str(call.args[0])
+        ]
+
+        assert "dep-quiet-pricing-test" in litellm.model_cost
+        assert "dep-quiet-pricing-test" not in warned_keys
+        assert warned_keys == ["openai/gpt-quiet-pricing-test"]
+    finally:
+        _restore_model_cost_entries(original_entries)

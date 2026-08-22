@@ -50,6 +50,7 @@ from litellm.utils import (
     get_litellm_params,
     get_optional_params,
     peek_reasoning_summary_aliases,
+    provider_qualified_cost_map_key,
     strip_reasoning_summary_aliases_from_optional_params,
 )
 
@@ -1202,16 +1203,20 @@ def _register_custom_pricing_for_request(
         kwargs=kwargs,
         model_info=model_info,
     )
-    shared_key: Final = f"{custom_llm_provider}/{model}"
+    shared_key: Final = provider_qualified_cost_map_key(model=model, custom_llm_provider=custom_llm_provider)
     deployment_id: Final = _get_router_deployment_id(kwargs)
     if deployment_id is None:
         litellm.register_model({shared_key: entry}, persist_across_reloads=False)
         return
+    # Split so the deployment-id half stays quiet: an id can never be in the
+    # built-in cost map, and only the shared key names something actionable.
     litellm.register_model(
-        {
-            deployment_id: entry,
-            shared_key: CustomPricingLiteLLMParams.strip_custom_pricing_fields(entry),
-        },
+        {deployment_id: entry},
+        persist_across_reloads=False,
+        warn_on_missing_builtin_entry=False,
+    )
+    litellm.register_model(
+        {shared_key: CustomPricingLiteLLMParams.strip_custom_pricing_fields(entry)},
         persist_across_reloads=False,
     )
 

@@ -2828,7 +2828,12 @@ def reapply_runtime_model_cost_registrations() -> None:
         register_model(model_cost=dict(_runtime_registered_model_cost))  # mutable-ok: snapshot, replay rewrites it
 
 
-def register_model(model_cost: str | dict, *, persist_across_reloads: bool = True):
+def register_model(
+    model_cost: str | dict,
+    *,
+    persist_across_reloads: bool = True,
+    warn_on_missing_builtin_entry: bool = True,
+):
     """
     Register new / Override existing models (and their pricing) to specific providers.
     Provide EITHER a model cost dictionary or a url to a hosted json blob
@@ -2848,6 +2853,13 @@ def register_model(model_cost: str | dict, *, persist_across_reloads: bool = Tru
     registering a model is declaring durable intent. Pass False for a
     registration that only describes one request, so it is dropped rather than
     re-asserted over every future catalog.
+
+    ``warn_on_missing_builtin_entry`` controls the "not in built-in cost map"
+    warning. Pass False when the key is a deployment id rather than a model
+    name: an id can never appear in the built-in map, so the warning names
+    something no operator can act on, and one router boot emits it once per
+    deployment. The same entry is also registered under the model's shared
+    backend key, where the warning still applies.
     """
 
     loaded_model_cost = {}
@@ -2892,7 +2904,8 @@ def register_model(model_cost: str | dict, *, persist_across_reloads: bool = Tru
                         if value.get(field) is None and builtin_entry.get(field) is not None:
                             existing_model[field] = builtin_entry[field]
                 elif (
-                    value.get("cache_creation_input_token_cost") is None
+                    warn_on_missing_builtin_entry
+                    and value.get("cache_creation_input_token_cost") is None
                     and value.get("cache_read_input_token_cost") is None
                 ):
                     verbose_logger.warning(
@@ -5318,6 +5331,22 @@ def _get_potential_model_names(model: str, custom_llm_provider: str | None) -> P
         combined_stripped_model_name=combined_stripped_model_name,
         custom_llm_provider=cast(str, custom_llm_provider),
     )
+
+
+def provider_qualified_cost_map_key(model: str, custom_llm_provider: str | None) -> str:
+    """The provider-qualified ``litellm.model_cost`` key a lookup will actually try.
+
+    Registration has to name a model the same way lookup does. When ``model``
+    already carries its provider prefix, ``_get_potential_model_names`` only ever
+    tries ``model`` itself, so prefixing a second time writes a key
+    (``openai/openai/kimi-k3``) that no lookup can read back: the deployment's
+    ``mode``, cache pricing and shared-backend fields become unreachable, and
+    registration warns about a model that is in fact in the built-in map. Deriving
+    the key from the same helper lookup uses keeps the two sides from drifting.
+    """
+    if custom_llm_provider is None:
+        return model
+    return _get_potential_model_names(model=model, custom_llm_provider=custom_llm_provider)["combined_model_name"]
 
 
 def _get_max_position_embeddings(model_name: str) -> int | None:

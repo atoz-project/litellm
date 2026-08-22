@@ -1584,3 +1584,115 @@ def test_inherit_builtin_tiered_output_rate_leaves_a_user_rate_alone():
     )
 
     assert model_info["output_cost_per_token"] == 9e-07
+
+
+def _cost_map_snapshot(keys):
+    return {key: copy.deepcopy(litellm.model_cost.get(key)) for key in keys}
+
+
+def test_provider_prefixed_deployment_registers_the_key_lookup_uses():
+    """A deployment whose ``model`` already carries its provider prefix.
+
+    Prefixing again produced ``openai/openai/kimi-k3``, a key
+    ``_get_potential_model_names`` never tries, so the deployment's ``mode`` and
+    shared-backend fields were unreachable and registration warned that a model
+    in the built-in map was missing from it.
+    """
+    model_keys = _cost_map_snapshot(
+        ("openai/kimi-k3-prefix-test", "openai/openai/kimi-k3-prefix-test", "dep-prefix-test")
+    )
+    try:
+        router = Router(model_list=[])
+        with patch.object(Router, "_add_deployment", lambda self, deployment: deployment):
+            router._create_deployment(
+                deployment_info={},
+                _model_name="round-robin/k3",
+                _litellm_params={
+                    "model": "openai/kimi-k3-prefix-test",
+                    "custom_llm_provider": "openai",
+                },
+                _model_info={"id": "dep-prefix-test", "mode": "chat"},
+            )
+
+        assert "openai/kimi-k3-prefix-test" in litellm.model_cost
+        assert "openai/openai/kimi-k3-prefix-test" not in litellm.model_cost
+        assert (
+            litellm.get_model_info(model="openai/kimi-k3-prefix-test", custom_llm_provider="openai")["mode"]
+            == "chat"
+        )
+    finally:
+        _restore_model_cost_entries(model_keys)
+
+
+def test_bare_model_deployment_still_registers_the_provider_qualified_key():
+    """The un-prefixed form must keep gaining the provider prefix."""
+    model_keys = _cost_map_snapshot(("openai/kimi-k3-bare-test", "dep-bare-test"))
+    try:
+        router = Router(model_list=[])
+        with patch.object(Router, "_add_deployment", lambda self, deployment: deployment):
+            router._create_deployment(
+                deployment_info={},
+                _model_name="round-robin/k3",
+                _litellm_params={
+                    "model": "kimi-k3-bare-test",
+                    "custom_llm_provider": "openai",
+                },
+                _model_info={"id": "dep-bare-test", "mode": "chat"},
+            )
+
+        assert "openai/kimi-k3-bare-test" in litellm.model_cost
+    finally:
+        _restore_model_cost_entries(model_keys)
+
+
+@pytest.mark.parametrize(
+    ("model", "custom_llm_provider", "expected"),
+    [
+        ("kimi-k3", "openai", ("openai/kimi-k3",)),
+        ("openai/kimi-k3", "openai", ("openai/kimi-k3",)),
+        ("anthropic/k3", "anthropic", ("anthropic/k3",)),
+        ("k3", None, ("k3",)),
+        ("responses/gpt-x", "azure", ("azure/responses/gpt-x", "azure/gpt-x")),
+        ("azure/responses/gpt-x", "azure", ("azure/responses/gpt-x", "azure/gpt-x")),
+    ],
+)
+def test_backend_cost_map_keys_match_lookup_shape(model, custom_llm_provider, expected):
+    assert Router._backend_cost_map_keys(model=model, custom_llm_provider=custom_llm_provider) == expected
+
+
+def _builtin_map_warnings(logger_mock):
+    """The keys `register_model` complained were missing from the built-in cost map."""
+    return [
+        call.args[1]
+        for call in logger_mock.warning.call_args_list
+        if call.args and "not in built-in cost map" in str(call.args[0])
+    ]
+
+
+def test_deployment_id_registration_does_not_warn_about_the_builtin_map():
+    """One boot used to warn once per deployment about its own id.
+
+    A deployment id can never appear in the built-in cost map, so the warning
+    named something no operator could act on. Only the shared backend key, which
+    is a real model name, is worth reporting.
+    """
+    model_keys = _cost_map_snapshot(("openai/kimi-k3-quiet-test", "dep-quiet-test"))
+    try:
+        router = Router(model_list=[])
+        with patch("litellm.utils.verbose_logger") as logger:
+            with patch.object(Router, "_add_deployment", lambda self, deployment: deployment):
+                router._create_deployment(
+                    deployment_info={},
+                    _model_name="round-robin/k3",
+                    _litellm_params={
+                        "model": "openai/kimi-k3-quiet-test",
+                        "custom_llm_provider": "openai",
+                    },
+                    _model_info={"id": "dep-quiet-test", "mode": "chat"},
+                )
+        warned_keys = _builtin_map_warnings(logger)
+
+        assert "dep-quiet-test" not in warned_keys
+        assert warned_keys == ["openai/kimi-k3-quiet-test"]
+    finally:
+        _restore_model_cost_entries(model_keys)
