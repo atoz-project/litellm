@@ -48,6 +48,17 @@ else:
     EndpointType = Any
 
 
+# `completion_cost` raises a bare `Exception` for any model absent from the cost map
+# ("This model isn't mapped yet. model=..."). Upstream ships no dedicated exception type
+# for that case, so the message is the only available marker.
+_UNPRICED_MODEL_ERROR_MARKER: Final = "isn't mapped yet"
+
+# Flat-rate / subscription deployments (Kimi Code `k3`) and brand-new upstream models are
+# unpriced by design, and they answer every request, so warn once per model instead of
+# once per request.
+_UNPRICED_MODELS_WARNED: Final[set[str]] = set()
+
+
 class AnthropicPassthroughLoggingHandler:
     @staticmethod
     def anthropic_passthrough_handler(
@@ -242,6 +253,46 @@ class AnthropicPassthroughLoggingHandler:
             details.text_tokens = recovered_output_tokens
 
     @staticmethod
+    def _response_cost_for_unpriced_safe_model(
+        litellm_model_response: ModelResponse | TextCompletionResponse,
+        model_for_cost: str,
+        custom_llm_provider: str | None,
+        custom_pricing: bool,
+        router_model_id: str | None,
+    ) -> float:
+        """Cost the response, treating an unpriced model as 0.0 instead of an error.
+
+        An unpriced model used to abort the whole payload build: the caller's single
+        ``except`` swallowed everything after this point, so the log record lost
+        ``response_cost``, ``model`` and ``custom_llm_provider`` **and** each request
+        emitted a full traceback. Subscription plans (Kimi Code ``k3``) and models newer
+        than the shipped cost map have no per-token rate to resolve, which is a data gap,
+        not a request failure. Any other costing error still propagates to the caller so
+        genuine costing regressions stay loud.
+        """
+        try:
+            return litellm.completion_cost(
+                completion_response=litellm_model_response,
+                model=model_for_cost,
+                custom_llm_provider=custom_llm_provider,
+                custom_pricing=custom_pricing,
+                router_model_id=router_model_id,
+            )
+        except Exception as e:
+            if _UNPRICED_MODEL_ERROR_MARKER not in str(e):
+                raise
+            if model_for_cost in _UNPRICED_MODELS_WARNED:
+                verbose_proxy_logger.debug("No cost map entry for %s; recording response_cost=0.0", model_for_cost)
+            else:
+                _UNPRICED_MODELS_WARNED.add(model_for_cost)
+                verbose_proxy_logger.warning(
+                    "No cost map entry for %s; recording response_cost=0.0 for this model. "
+                    "Add per-token pricing to model_prices_and_context_window.json to track spend.",
+                    model_for_cost,
+                )
+            return 0.0
+
+    @staticmethod
     def _create_anthropic_response_logging_payload(
         litellm_model_response: ModelResponse | TextCompletionResponse,
         model: str,
@@ -279,9 +330,9 @@ class AnthropicPassthroughLoggingHandler:
             response_cost: Final = (
                 0.0
                 if logging_obj.model_call_details.get("cache_hit") is True
-                else litellm.completion_cost(
-                    completion_response=litellm_model_response,
-                    model=model_for_cost,
+                else AnthropicPassthroughLoggingHandler._response_cost_for_unpriced_safe_model(
+                    litellm_model_response=litellm_model_response,
+                    model_for_cost=model_for_cost,
                     custom_llm_provider=custom_llm_provider,
                     custom_pricing=custom_pricing,
                     router_model_id=router_model_id,

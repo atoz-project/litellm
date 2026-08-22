@@ -2432,3 +2432,106 @@ class TestAnthropicPassthroughFastMode:
 
         assert fast.usage.speed == "fast"
         assert self._cost(fast) == pytest.approx(self._expected_fast_cost(self._cost(standard)))
+
+
+class TestUnpricedModelCostTracking:
+    """Regression tests for unpriced models aborting the whole logging payload.
+
+    Production symptom (2026-08-22, native Kimi `k3` on `custom_llm_provider=anthropic`):
+    every successful request logged
+    `Error creating Anthropic response logging payload: This model isn't mapped yet.
+    model=anthropic/k3` with a full traceback, and because the single `except` wrapped the
+    entire payload build, the log record also lost `response_cost`, `model` and
+    `custom_llm_provider`.
+    """
+
+    MODULE = "litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler"
+
+    def setup_method(self):
+        import litellm
+        from litellm.proxy.pass_through_endpoints.llm_provider_handlers import (
+            anthropic_passthrough_logging_handler as mod,
+        )
+
+        # warn-once state is module level; keep tests order independent.
+        # getattr keeps these tests red-by-assertion (not red-by-AttributeError) when run
+        # against a build that predates the unpriced-model guard.
+        getattr(mod, "_UNPRICED_MODELS_WARNED", set()).clear()
+        self.mod = mod
+        self.priced_model = next(
+            name
+            for name, info in litellm.model_cost.items()
+            if name.startswith("claude-") and info.get("input_cost_per_token")
+        )
+
+    @staticmethod
+    def _logging_obj(model: str) -> LiteLLMLoggingObj:
+        obj = LiteLLMLoggingObj(
+            model=model,
+            messages=[{"role": "user", "content": "hi"}],
+            stream=False,
+            call_type="pass_through_endpoint",
+            start_time=datetime.now(),
+            litellm_call_id="unpriced-call-id",
+            function_id="1",
+        )
+        obj.model_call_details["custom_llm_provider"] = "anthropic"
+        return obj
+
+    @staticmethod
+    def _response(model: str):
+        from litellm.types.utils import ModelResponse, Usage
+
+        response = ModelResponse()
+        response.model = model
+        response.choices[0].message.content = "ok"
+        response.usage = Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+        return response
+
+    def _build_payload(self, model: str):
+        logging_obj = self._logging_obj(model)
+        now = datetime.now()
+        with patch(f"{self.MODULE}.verbose_proxy_logger") as logger:
+            kwargs = AnthropicPassthroughLoggingHandler._create_anthropic_response_logging_payload(
+                litellm_model_response=self._response(model),
+                model=model,
+                kwargs={},
+                start_time=now,
+                end_time=now,
+                logging_obj=logging_obj,
+            )
+        return kwargs, logging_obj, logger
+
+    def test_unpriced_model_keeps_logging_payload(self):
+        kwargs, logging_obj, logger = self._build_payload("k3")
+
+        assert logger.exception.call_count == 0
+        assert kwargs["response_cost"] == 0.0
+        assert kwargs["model"] == "k3"
+        assert logging_obj.model_call_details["response_cost"] == 0.0
+        assert logging_obj.model_call_details["custom_llm_provider"] == "anthropic"
+
+    def test_unpriced_model_warns_once_per_model(self):
+        _, _, first = self._build_payload("k3")
+        _, _, second = self._build_payload("k3")
+
+        assert first.warning.call_count == 1
+        assert "anthropic/k3" in first.warning.call_args[0][1]
+        assert second.warning.call_count == 0
+        assert second.debug.call_count >= 1
+
+    def test_priced_model_still_computes_cost(self):
+        kwargs, _, logger = self._build_payload(self.priced_model)
+
+        assert logger.exception.call_count == 0
+        assert logger.warning.call_count == 0
+        assert kwargs["response_cost"] > 0
+
+    def test_unexpected_costing_error_stays_loud(self):
+        """A costing failure that is not "model isn't mapped" must not be swallowed."""
+        with patch("litellm.completion_cost", side_effect=ValueError("boom")):
+            kwargs, _, logger = self._build_payload("k3")
+
+        assert logger.warning.call_count == 0
+        assert logger.exception.call_count == 1
+        assert "response_cost" not in kwargs
