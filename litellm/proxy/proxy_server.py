@@ -15559,6 +15559,94 @@ async def update_config(
         )
 
 
+@router.get(
+    "/config/get",
+    tags=["config.yaml"],
+    dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
+)
+async def get_config_param(
+    param_name: str,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """
+    Read a raw config row from LiteLLM_Config by param_name.
+
+    Returns the stored param_value (the DB override), or 404 if the row does
+    not exist — meaning no DB override is active and the running value comes
+    from config.yaml. This endpoint exists so the Terraform provider can do
+    accurate drift detection: it must distinguish "DB has an override row"
+    from "the running value is just the config.yaml baseline" (which
+    /router/settings cannot, since it returns the merged runtime value).
+    """
+    if prisma_client is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": CommonProxyErrors.db_not_connected_error.value},
+        )
+    if not _user_has_admin_view(user_api_key_dict):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": f"{CommonProxyErrors.not_allowed_access.value}, your role={user_api_key_dict.user_role}"},
+        )
+    if param_name not in ConfigRepository.CONFIG_PARAMS:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": f"Invalid param_name={param_name}. Must be one of {ConfigRepository.CONFIG_PARAMS}"},
+        )
+    config_param: Final = await ConfigRepository(prisma_client).get_param(param_name)
+    if config_param is None or config_param.param_value is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": f"param_name={param_name} not found in DB (no override; running value comes from config.yaml)"},
+        )
+    return {"param_name": config_param.param_name, "param_value": config_param.param_value}
+
+
+@router.delete(
+    "/config/param",
+    tags=["config.yaml"],
+    dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
+)
+async def delete_config_param(
+    param_name: str,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """
+    Delete a config row from LiteLLM_Config by param_name.
+
+    The running value falls back to config.yaml on the next router reload
+    (add_deployment / restart). This endpoint exists so the Terraform provider
+    can implement Delete: removing the DB override restores config.yaml as the
+    source of truth for that section. Requires PROXY_ADMIN.
+    """
+    if prisma_client is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": CommonProxyErrors.db_not_connected_error.value},
+        )
+    if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "Only proxy admins can delete config params"},
+        )
+    if param_name not in ConfigRepository.CONFIG_PARAMS:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": f"Invalid param_name={param_name}. Must be one of {ConfigRepository.CONFIG_PARAMS}"},
+        )
+    existing: Final = await ConfigRepository(prisma_client).get_param(param_name)
+    if existing is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": f"param_name={param_name} not found in DB"},
+        )
+    await ConfigRepository(prisma_client).delete_param(param_name)
+    await invalidate_config_param(param_name)
+    return {"param_name": param_name, "deleted": True}
+
+
 ### CONFIG GENERAL SETTINGS
 """
 - Update config settings
