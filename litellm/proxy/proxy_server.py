@@ -15565,7 +15565,11 @@ async def update_config(
     dependencies=[Depends(user_api_key_auth)],
     include_in_schema=False,
 )
-async def get_config_param(
+# NOTE: 函数名不得叫 get_config_param —— 会遮蔽本文件 import 的
+# litellm.proxy.utils.get_config_param(prisma_client, param_name) helper,
+# 致 _update_config_from_db 等 4 个调用点把 param_name str 当
+# user_api_key_dict 传进来(2026-08-24 /router/settings 500 根因)。
+async def read_config_param(
     param_name: str,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
