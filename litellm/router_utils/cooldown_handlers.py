@@ -22,6 +22,43 @@ from litellm.constants import (
 )
 from litellm.router_utils.cooldown_callbacks import router_cooldown_event_callback
 
+# ---------------------------------------------------------------------------
+# custom-aigw: periodic-quota errors -> immediate long cooldown.
+# Upstream hard-excludes 403 from cooldown (only 401/404/408/428/429 of 4xx are
+# cooled), so a deployment whose key exhausted a PERIODIC quota (Kimi Code weekly
+# billing cycle) keeps being re-picked by simple-shuffle; every pick burns an
+# in-group retry, and errors surface once retries exhaust. Periodic quota does
+# not recover in seconds, so cool immediately with a long TTL floor; after the
+# TTL a single probe re-tries the key, which also self-heals on window reset.
+#
+# Match is TEXT-ONLY and status-agnostic: the anthropic exception mapper's 403
+# branch (exception_mapping_utils._map_anthropic_exception) raises
+# PermissionDeniedError with the upstream body embedded in the message, and
+# OpenAI-compatible surfaces (new-api etc.) can still surface the quota body
+# through a generic APIConnectionError — which is on the no-cooldown veto list
+# below. The marker phrase only ever appears on periodic-quota errors, so plain
+# permission 403s (bad key/scope) and transient connection blips never match.
+#
+# ADR-0004 (GH#5): the 429 marker "usage limit for this period" (5h rolling
+# window) gets the same treatment as the billing-cycle 403. The fixed 6h TTL
+# is replaced by a 1h BLIND placeholder: the "billing cycle" wording is known
+# to mislead (it is usually just the 5h window), so the placeholder only covers
+# the blind-flying window while the usages probe confirms the real resetTime.
+# ---------------------------------------------------------------------------
+from litellm.router_utils.quota_sync import QUOTA_BLIND_COOLDOWN_SECONDS, sync_deployment_quota
+
+_PERIODIC_QUOTA_MARKERS: Final = (
+    "usage limit for this billing cycle",
+    "usage limit for this period",
+)
+
+
+def _is_periodic_quota_error(exception_str: str | None) -> bool:
+    if not exception_str:
+        return False
+    s = exception_str.lower()
+    return any(m in s for m in _PERIODIC_QUOTA_MARKERS)
+
 from .router_callbacks.track_deployment_metrics import (
     get_deployment_failures_for_current_minute,
     get_deployment_successes_for_current_minute,
@@ -223,7 +260,9 @@ def _is_cooldown_required(
         if exception_str is not None:  # don't cooldown on litellm api connection errors errors
             for ignored_string in ignored_strings:
                 if ignored_string in exception_str:
-                    return False
+                    # custom-aigw: periodic quota is multi-day, not a transient
+                    # blip — the APIConnectionError veto must not suppress it.
+                    return _is_periodic_quota_error(exception_str)
 
         if isinstance(exception_status, str):
             if len(exception_status) == 0:
@@ -249,6 +288,9 @@ def _is_cooldown_required(
             elif exception_status == 408 or exception_status == 404:
                 return True
 
+            elif exception_status == 403 and _is_periodic_quota_error(exception_str):
+                # custom-aigw: cool down periodic-quota 403 (Kimi Code weekly billing cycle)
+                return True
             else:
                 # Do NOT cool down all other 4XX Errors
                 return False
@@ -455,19 +497,37 @@ def _set_cooldown_deployments(
     exception_status_int: Final = cast_exception_status_to_int(exception_status)
     verbose_router_logger.debug("Attempting to add %s to cooldown list", deployment)
 
-    if _should_cooldown_deployment(
-        litellm_router_instance=litellm_router_instance,
-        deployment=deployment,
-        exception_status=exception_status,
-        original_exception=original_exception,
-        requested_model_group=requested_model_group,
-    ):
+    if _is_periodic_quota_error(str(original_exception)):
+        # custom-aigw: periodic-quota errors bypass fail-count policy (the quota
+        # does not recover after N minutes of probing) and land the 1h blind
+        # placeholder TTL; a fire-and-forget usages probe below overwrites it
+        # with the authoritative resetTime + buffer (ADR-0004).
+        time_to_cooldown = max(time_to_cooldown or 0, QUOTA_BLIND_COOLDOWN_SECONDS)
+        should_cooldown = True
+    else:
+        should_cooldown = _should_cooldown_deployment(
+            litellm_router_instance=litellm_router_instance,
+            deployment=deployment,
+            exception_status=exception_status,
+            original_exception=original_exception,
+            requested_model_group=requested_model_group,
+        )
+
+    if should_cooldown:
         litellm_router_instance.cooldown_cache.add_deployment_to_cooldown(
             model_id=deployment,
             original_exception=original_exception,
             exception_status=exception_status_int,
             cooldown_time=time_to_cooldown,
         )
+
+        # custom-aigw (ADR-0004): on a periodic-quota wall-hit, immediately probe
+        # usages to overwrite the 1h placeholder TTL with the real resetTime.
+        # _set_cooldown_deployments is sync — fire-and-forget, never await here
+        # (same create_task precedent as the callback below). Probe failures
+        # change nothing, leaving the placeholder in place.
+        if _is_periodic_quota_error(str(original_exception)):
+            asyncio.create_task(sync_deployment_quota(litellm_router_instance, deployment))
 
         # Trigger cooldown callback handler
         asyncio.create_task(
