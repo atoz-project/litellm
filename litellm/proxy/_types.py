@@ -5105,3 +5105,12 @@ class CostEstimateResponse(LiteLLMPydanticObjectBase):
     input_cost_per_token: float | None = None
     output_cost_per_token: float | None = None
     provider: str | None = None
+
+
+class ResetCircuitBreakerResponse(BaseModel):
+    """Response model for /reset endpoint (custom-aigw fork)."""
+
+    status: str
+    message: str
+    cooldowns_cleared: int
+    failed_call_counters_cleared: int
