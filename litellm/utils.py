@@ -9968,6 +9968,9 @@ class ProviderConfigManager:
         """
         Get Search configuration for a given provider.
         """
+        from litellm.llms.aliyun_iqs.search.transformation import (
+            AliyunIQSSearchConfig,
+        )
         from litellm.llms.apiserpent.search.transformation import (
             APISerpentSearchConfig,
         )
@@ -10014,6 +10017,7 @@ class ProviderConfigManager:
             SearchProviders.AGENTCORE: AgentCoreSearchConfig,
             SearchProviders.NIMBLE: NimbleSearchConfig,
             SearchProviders.BING_GROUNDING: BingGroundingSearchConfig,
+            SearchProviders.ALIYUN_IQS: AliyunIQSSearchConfig,
         }
         config_class: Final = PROVIDER_TO_CONFIG_MAP.get(provider, None)
         if config_class is None:
