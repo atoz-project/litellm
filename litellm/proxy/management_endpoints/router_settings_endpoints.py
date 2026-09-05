@@ -161,7 +161,7 @@ async def get_router_settings(
             source=source,
         )
     except Exception as e:
-        verbose_proxy_logger.error("Error fetching router settings: %s", e)
+        verbose_proxy_logger.exception("Error fetching router settings: %s", e)
         raise
 
 
@@ -210,5 +210,5 @@ async def get_router_fields(
             routing_group_strategies=(*available_routing_strategies, "priority"),
         )
     except Exception as e:
-        verbose_proxy_logger.error("Error fetching router fields: %s", e)
+        verbose_proxy_logger.exception("Error fetching router fields: %s", e)
         raise
