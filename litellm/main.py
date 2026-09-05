@@ -53,6 +53,7 @@ from litellm.utils import (
     get_optional_params,
     peek_reasoning_summary_aliases,
     strip_reasoning_summary_aliases_from_optional_params,
+    provider_qualified_cost_map_key,
 )
 
 if TYPE_CHECKING:
@@ -1183,7 +1184,10 @@ def _register_custom_pricing_for_request(
         kwargs=kwargs,
         model_info=model_info,
     )
-    shared_key: Final = f"{custom_llm_provider}/{model}"
+    # custom-aigw: name the shared key the way a lookup will actually try it —
+    # an already provider-prefixed model must not be prefixed a second time
+    # (openai/openai/kimi-k3 is unreadable; mode/cache pricing never applies).
+    shared_key: Final = provider_qualified_cost_map_key(model=model, custom_llm_provider=custom_llm_provider)
     deployment_id: Final = _get_router_deployment_id(kwargs)
     if deployment_id is None:
         litellm.register_model({shared_key: entry}, persist_across_reloads=False)

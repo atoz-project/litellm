@@ -3319,3 +3319,73 @@ def test_deployment_id_matching_its_own_providers_catalog_key_still_merges() -> 
     finally:
         _restore_model_cost_entries(model_cost_entries)
         litellm.get_model_info.cache_clear()
+
+
+def test_provider_prefixed_deployment_registers_the_key_lookup_uses():
+    """custom-aigw: a deployment whose ``model`` already carries its provider prefix.
+
+    Prefixing again produced ``openai/openai/kimi-k3``, a key
+    ``_get_potential_model_names`` never tries, so the deployment's ``mode`` and
+    shared-backend fields were unreachable.
+    """
+    model_keys = {
+        key: copy.deepcopy(litellm.model_cost.get(key))
+        for key in ("openai/kimi-k3-prefix-test", "openai/openai/kimi-k3-prefix-test", "dep-prefix-test")
+    }
+    try:
+        router = Router(model_list=[])
+        with patch.object(Router, "_add_deployment", lambda self, deployment: deployment):
+            router._create_deployment(
+                deployment_info={},
+                _model_name="round-robin/k3",
+                _litellm_params={
+                    "model": "openai/kimi-k3-prefix-test",
+                    "custom_llm_provider": "openai",
+                },
+                _model_info={"id": "dep-prefix-test", "mode": "chat"},
+            )
+
+        assert "openai/kimi-k3-prefix-test" in litellm.model_cost
+        assert "openai/openai/kimi-k3-prefix-test" not in litellm.model_cost
+        assert (
+            litellm.get_model_info(model="openai/kimi-k3-prefix-test", custom_llm_provider="openai")["mode"]
+            == "chat"
+        )
+    finally:
+        _restore_model_cost_entries(model_keys)
+
+
+def test_bare_model_deployment_still_registers_the_provider_qualified_key():
+    """The un-prefixed form must keep gaining the provider prefix."""
+    model_keys = {key: copy.deepcopy(litellm.model_cost.get(key)) for key in ("openai/kimi-k3-bare-test", "dep-bare-test")}
+    try:
+        router = Router(model_list=[])
+        with patch.object(Router, "_add_deployment", lambda self, deployment: deployment):
+            router._create_deployment(
+                deployment_info={},
+                _model_name="round-robin/k3",
+                _litellm_params={
+                    "model": "kimi-k3-bare-test",
+                    "custom_llm_provider": "openai",
+                },
+                _model_info={"id": "dep-bare-test", "mode": "chat"},
+            )
+
+        assert "openai/kimi-k3-bare-test" in litellm.model_cost
+    finally:
+        _restore_model_cost_entries(model_keys)
+
+
+@pytest.mark.parametrize(
+    ("model", "custom_llm_provider", "expected"),
+    [
+        ("kimi-k3", "openai", ("openai/kimi-k3",)),
+        ("openai/kimi-k3", "openai", ("openai/kimi-k3",)),
+        ("anthropic/k3", "anthropic", ("anthropic/k3",)),
+        ("k3", None, ("k3",)),
+        ("responses/gpt-x", "azure", ("azure/responses/gpt-x", "azure/gpt-x")),
+        ("azure/responses/gpt-x", "azure", ("azure/responses/gpt-x", "azure/gpt-x")),
+    ],
+)
+def test_backend_cost_map_keys_match_lookup_shape(model, custom_llm_provider, expected):
+    assert Router._backend_cost_map_keys(model=model, custom_llm_provider=custom_llm_provider) == expected
