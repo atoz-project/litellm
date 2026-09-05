@@ -263,6 +263,7 @@ from litellm.utils import (
     get_utc_datetime,
     is_region_allowed,
     provider_rejectable_params,
+    provider_qualified_cost_map_key,
     set_live_deployment_replay,
 )
 
@@ -9700,7 +9701,10 @@ class Router:
     @staticmethod
     def _backend_cost_map_keys(model: str, custom_llm_provider: str | None) -> tuple[str, ...]:
         """The ``litellm.model_cost`` keys a deployment's shared backend info is registered under."""
-        backend_key: Final = model if custom_llm_provider is None else f"{custom_llm_provider}/{model}"
+        # custom-aigw: name the key the way a lookup will actually try it — an
+        # already provider-prefixed model must not be prefixed a second time
+        # (openai/openai/kimi-k3 is unreadable; mode/cache pricing never applies).
+        backend_key: Final = provider_qualified_cost_map_key(model=model, custom_llm_provider=custom_llm_provider)
         if "responses/" in backend_key:
             return (backend_key, backend_key.replace("responses/", ""))
         return (backend_key,)
