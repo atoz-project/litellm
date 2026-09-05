@@ -1,11 +1,16 @@
 import asyncio
 import json
+import os
+import sys
 from datetime import datetime
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+sys.path.insert(
+    0, os.path.abspath("../../..")
+)  # Adds the parent directory to the system path
 
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler import (
@@ -2317,10 +2322,10 @@ class TestAnthropicResponseCostRecordedOnModelCallDetails:
 
 
 class TestAnthropicPassthroughFastMode:
-    """Anthropic charges a provider-specific multiplier for ``speed=fast``, applied off
-    ``usage.speed`` and covering every token type, cache included. The response usage
-    carries the served speed when the request asked for one; the request body's value is
-    the fallback, so the handler still threads it into every usage-building path."""
+    """Anthropic charges a provider-specific multiplier for ``speed=fast``, and the
+    multiplier is applied off ``usage.speed``. The pass-through handler only sees the
+    speed in the request body, so it has to thread it into every usage-building path or
+    fast-mode pass-through spend is under-reported."""
 
     MODEL = "claude-opus-4-8"
     STREAM_CHUNKS = [
@@ -2358,7 +2363,11 @@ class TestAnthropicPassthroughFastMode:
         return litellm.completion_cost(completion_response=response, model=f"anthropic/{self.MODEL}")
 
     def _expected_fast_cost(self, standard_cost: float) -> float:
-        return standard_cost * 2.0
+        import litellm
+
+        model_info = litellm.get_model_info(model=self.MODEL, custom_llm_provider="anthropic")
+        cache_read_cost = 200 * (model_info.get("cache_read_input_token_cost") or 0.0)
+        return (standard_cost - cache_read_cost) * 2.0 + cache_read_cost
 
     def test_non_streaming_applies_fast_multiplier(self):
         import httpx
@@ -2424,20 +2433,105 @@ class TestAnthropicPassthroughFastMode:
         assert fast.usage.speed == "fast"
         assert self._cost(fast) == pytest.approx(self._expected_fast_cost(self._cost(standard)))
 
-    def test_usage_only_fallback_prefers_served_speed_from_stream(self):
-        served_standard_chunks = [
-            chunk.replace('"usage": {"input_tokens": 1000', '"usage": {"speed": "standard", "input_tokens": 1000')
-            for chunk in self.STREAM_CHUNKS
-        ]
-        served_standard = AnthropicPassthroughLoggingHandler._build_usage_only_response_from_chunks(
-            all_chunks=served_standard_chunks,
-            model=self.MODEL,
-            speed="fast",
-        )
-        standard = AnthropicPassthroughLoggingHandler._build_usage_only_response_from_chunks(
-            all_chunks=self.STREAM_CHUNKS,
-            model=self.MODEL,
+
+class TestUnpricedModelCostTracking:
+    """Regression tests for unpriced models aborting the whole logging payload.
+
+    Production symptom (2026-08-22, native Kimi `k3` on `custom_llm_provider=anthropic`):
+    every successful request logged
+    `Error creating Anthropic response logging payload: This model isn't mapped yet.
+    model=anthropic/k3` with a full traceback, and because the single `except` wrapped the
+    entire payload build, the log record also lost `response_cost`, `model` and
+    `custom_llm_provider`.
+    """
+
+    MODULE = "litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler"
+
+    def setup_method(self):
+        import litellm
+        from litellm.proxy.pass_through_endpoints.llm_provider_handlers import (
+            anthropic_passthrough_logging_handler as mod,
         )
 
-        assert served_standard.usage.speed == "standard"
-        assert self._cost(served_standard) == pytest.approx(self._cost(standard))
+        # warn-once state is module level; keep tests order independent.
+        # getattr keeps these tests red-by-assertion (not red-by-AttributeError) when run
+        # against a build that predates the unpriced-model guard.
+        getattr(mod, "_UNPRICED_MODELS_WARNED", set()).clear()
+        self.mod = mod
+        self.priced_model = next(
+            name
+            for name, info in litellm.model_cost.items()
+            if name.startswith("claude-") and info.get("input_cost_per_token")
+        )
+
+    @staticmethod
+    def _logging_obj(model: str) -> LiteLLMLoggingObj:
+        obj = LiteLLMLoggingObj(
+            model=model,
+            messages=[{"role": "user", "content": "hi"}],
+            stream=False,
+            call_type="pass_through_endpoint",
+            start_time=datetime.now(),
+            litellm_call_id="unpriced-call-id",
+            function_id="1",
+        )
+        obj.model_call_details["custom_llm_provider"] = "anthropic"
+        return obj
+
+    @staticmethod
+    def _response(model: str):
+        from litellm.types.utils import ModelResponse, Usage
+
+        response = ModelResponse()
+        response.model = model
+        response.choices[0].message.content = "ok"
+        response.usage = Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+        return response
+
+    def _build_payload(self, model: str):
+        logging_obj = self._logging_obj(model)
+        now = datetime.now()
+        with patch(f"{self.MODULE}.verbose_proxy_logger") as logger:
+            kwargs = AnthropicPassthroughLoggingHandler._create_anthropic_response_logging_payload(
+                litellm_model_response=self._response(model),
+                model=model,
+                kwargs={},
+                start_time=now,
+                end_time=now,
+                logging_obj=logging_obj,
+            )
+        return kwargs, logging_obj, logger
+
+    def test_unpriced_model_keeps_logging_payload(self):
+        kwargs, logging_obj, logger = self._build_payload("k3")
+
+        assert logger.exception.call_count == 0
+        assert kwargs["response_cost"] == 0.0
+        assert kwargs["model"] == "k3"
+        assert logging_obj.model_call_details["response_cost"] == 0.0
+        assert logging_obj.model_call_details["custom_llm_provider"] == "anthropic"
+
+    def test_unpriced_model_warns_once_per_model(self):
+        _, _, first = self._build_payload("k3")
+        _, _, second = self._build_payload("k3")
+
+        assert first.warning.call_count == 1
+        assert "anthropic/k3" in first.warning.call_args[0][1]
+        assert second.warning.call_count == 0
+        assert second.debug.call_count >= 1
+
+    def test_priced_model_still_computes_cost(self):
+        kwargs, _, logger = self._build_payload(self.priced_model)
+
+        assert logger.exception.call_count == 0
+        assert logger.warning.call_count == 0
+        assert kwargs["response_cost"] > 0
+
+    def test_unexpected_costing_error_stays_loud(self):
+        """A costing failure that is not "model isn't mapped" must not be swallowed."""
+        with patch("litellm.completion_cost", side_effect=ValueError("boom")):
+            kwargs, _, logger = self._build_payload("k3")
+
+        assert logger.warning.call_count == 0
+        assert logger.exception.call_count == 1
+        assert "response_cost" not in kwargs
