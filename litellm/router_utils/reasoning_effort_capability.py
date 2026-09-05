@@ -179,6 +179,35 @@ def resolve_supported_reasoning_efforts(
     return tuple(effort for effort in REASONING_EFFORT_ADVERTISEMENT_ORDER if effort in allowed)
 
 
+def resolve_request_path_reasoning_efforts(
+    model_info: Mapping[str, object],
+    *,
+    deployment_is_mapped: bool,
+) -> tuple[str, ...] | None:
+    """The set a request-path normalization gate should trust.
+
+    custom-aigw: identical to :func:`resolve_supported_reasoning_efforts` except
+    that ``minimal`` is never included via the advertisement opt-out default.
+    The advertisement default treats a missing ``supports_minimal_reasoning_effort``
+    as "accepted" (a missing flag costs only advisory metadata upstream), but on
+    the request path that same default forwards ``reasoning_effort="minimal"`` to
+    upstreams that reject it (DashScope-compatible openai gateways 400). Only an
+    explicit ``supports_minimal_reasoning_effort=True`` — on the deployment entry
+    or its bare twin — earns ``minimal`` here; a declared
+    ``reasoning_effort_levels`` set is authoritative and returned whole.
+    """
+    resolved: Final = resolve_supported_reasoning_efforts(
+        model_info, deployment_is_mapped=deployment_is_mapped
+    )
+    if not resolved or "minimal" not in resolved:
+        return resolved
+    if declared_reasoning_efforts(model_info) is not None:
+        return resolved
+    if _declared_effort_flags(model_info).get("minimal") is True:
+        return resolved
+    return tuple(level for level in resolved if level != "minimal")
+
+
 def intersect_supported_reasoning_efforts(
     current: Sequence[str] | None,
     resolved: Sequence[str] | None,

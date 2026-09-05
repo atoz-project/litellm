@@ -85,7 +85,9 @@ def normalize_reasoning_effort_value(
     if chain is None:
         return effort
 
-    from litellm.router_utils.reasoning_effort_capability import resolve_supported_reasoning_efforts
+    from litellm.router_utils.reasoning_effort_capability import (
+        resolve_request_path_reasoning_efforts,
+    )
     from litellm.utils import get_model_info
 
     try:
@@ -93,7 +95,10 @@ def normalize_reasoning_effort_value(
     except Exception:
         return chain[-1]
 
-    supported: Final = resolve_supported_reasoning_efforts(model_info, deployment_is_mapped=True)
+    # custom-aigw: the request path uses the narrower set — a missing
+    # supports_minimal_reasoning_effort must not earn "minimal" here, because
+    # forwarding it to an upstream that rejects it is a 400, not metadata.
+    supported: Final = resolve_request_path_reasoning_efforts(model_info, deployment_is_mapped=True)
     if not supported:
         return chain[-1]
 
