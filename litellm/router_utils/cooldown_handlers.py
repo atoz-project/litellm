@@ -232,7 +232,14 @@ def _is_cooldown_required(
             exception_status = int(exception_status)
 
         if exception_status >= 400 and exception_status < 500:
-            if exception_status == 429:
+            if exception_status == 428:
+                # custom-aigw: cool down 428 Precondition Required. Kimi plan keys
+                # reject with 428 when the account's periodic quota window is
+                # exhausted; without cooling, simple-shuffle keeps re-picking the
+                # dead key and every pick burns an in-group retry.
+                return True
+
+            elif exception_status == 429:
                 # Cool down 429 Rate Limit Errors
                 return True
 
