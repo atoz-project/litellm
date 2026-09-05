@@ -10,6 +10,7 @@ import contextvars
 from collections.abc import AsyncIterator, Coroutine, Iterator
 from functools import partial
 from typing import Any, Final, cast
+from urllib.parse import urlparse
 
 import litellm
 from litellm.litellm_core_utils.exception_mapping_utils import exception_type
@@ -72,19 +73,84 @@ def _should_route_to_responses_api(
     custom_llm_provider: str | None,
     requested_model: str | None = None,
     resolved_model: str | None = None,
+    api_base: object = None,
+    model_info: object = None,
 ) -> bool:
     """Return True when the request should use the Responses API path.
 
-    Set ``litellm.use_chat_completions_url_for_anthropic_messages = True`` to
-    opt out and route OpenAI/Azure requests through chat/completions instead.
+    Precedence (custom-aigw): a per-deployment declaration wins over the global
+    flag, which remains the fallback for undeclared deployments.
+
+    1. ``model_info.supported_endpoints`` containing ``"/v1/responses"``, or
+       ``model_info.mode == "responses"`` → Responses, even when
+       ``litellm.use_chat_completions_url_for_anthropic_messages`` is set.
+       A ``supported_endpoints`` list WITHOUT ``"/v1/responses"`` (or
+       ``mode == "chat"``) → chat completions, even with the flag unset.
+    2. Undeclared deployment + ``use_chat_completions_url_for_anthropic_messages
+       = True`` → chat completions (upstream behavior).
+    3. custom-aigw: the blanket ``openai`` → Responses routing only applies
+       when the effective api_base is api.openai.com. OpenAI-compatible
+       third-party gateways (DashScope compatible-mode, new-api, ...) expose
+       chat/completions but not /v1/responses, and used to 400 on
+       ``Unsupported model`` when the provider alone triggered the bridge.
+    4. Upstream fallback: a Responses-mode deployment id shadowed by the
+       provider-prefix strip still routes to Responses.
     """
+    declared: Final = _deployment_declares_responses_api(model_info)
+    if declared is not None:
+        return declared
     if litellm.use_chat_completions_url_for_anthropic_messages:
         return False
     if custom_llm_provider in _RESPONSES_API_PROVIDERS:
-        return True
+        return _is_openai_native_api_base(api_base)
     if custom_llm_provider is None or requested_model is None or resolved_model is None:
         return False
     return _responses_mode_is_lost_by_prefix_strip(requested_model, resolved_model, custom_llm_provider)
+
+
+# custom-aigw: endpoint path for a deployment's supported_endpoints declaration.
+_RESPONSES_ENDPOINT: Final = "/v1/responses"
+
+
+def _deployment_declares_responses_api(model_info: object) -> bool | None:
+    """The deployment's own answer to "chat completions or Responses API?".
+
+    Returns True/False when the deployment declares an answer, None when it
+    declares nothing and the fallback chain must decide:
+
+    - ``model_info.supported_endpoints`` present (a list/tuple): True iff it
+      contains ``"/v1/responses"``. A declaration WITHOUT it is an explicit
+      opt-out, so the global chat-completions flag cannot silently route the
+      deployment to an upstream that has no /v1/responses.
+    - ``model_info.mode == "responses"`` (upstream's per-model bridge
+      mechanism): True. ``mode == "chat"`` is a declaration too, and wins.
+    """
+    if not isinstance(model_info, dict):
+        return None
+    supported_endpoints: Final = model_info.get("supported_endpoints")
+    if isinstance(supported_endpoints, (list, tuple)):
+        return _RESPONSES_ENDPOINT in supported_endpoints
+    mode: Final = model_info.get("mode")
+    if mode == "responses":
+        return True
+    if mode == "chat":
+        return False
+    return None
+
+
+def _is_openai_native_api_base(api_base: object) -> bool:
+    """custom-aigw: whether the effective api_base points at OpenAI's own API.
+
+    OpenAI-compatible third-party gateways (DashScope compatible-mode,
+    new-api, one-api, ...) expose chat/completions but not /v1/responses, so
+    only api.openai.com justifies the blanket openai -> responses routing.
+    """
+    if not isinstance(api_base, str) or not api_base:
+        # No explicit api_base: the request will hit OpenAI's default base.
+        return True
+    normalized: Final = api_base if "://" in api_base else f"https://{api_base}"
+    hostname: Final = urlparse(normalized).hostname or ""
+    return hostname == "api.openai.com" or hostname.endswith(".api.openai.com")
 
 
 def _deployment_passes_through_anthropic_messages(model_info: object) -> bool:
@@ -578,7 +644,16 @@ def anthropic_messages_handler(
         )
     if anthropic_messages_provider_config is None:
         # Route to Responses API for OpenAI / Azure, chat/completions for everything else.
-        if _should_route_to_responses_api(custom_llm_provider, original_model, model):
+        # custom-aigw: per-deployment declarations (supported_endpoints /
+        # mode) beat the global flag; the resolved api_base is passed so the
+        # openai blanket only fires for genuine api.openai.com deployments.
+        if _should_route_to_responses_api(
+            custom_llm_provider,
+            original_model,
+            model,
+            api_base=api_base or dynamic_api_base,
+            model_info=kwargs.get("model_info"),
+        ):
             return LiteLLMMessagesToResponsesAPIHandler.anthropic_messages_handler(
                 max_tokens=max_tokens,
                 messages=messages,
