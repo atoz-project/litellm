@@ -5552,6 +5552,21 @@ def _get_potential_model_names(model: str, custom_llm_provider: str | None) -> P
     )
 
 
+def provider_qualified_cost_map_key(model: str, custom_llm_provider: str | None) -> str:
+    """The provider-qualified ``litellm.model_cost`` key a lookup will actually try.
+
+    custom-aigw: registration has to name a model the same way lookup does. When
+    ``model`` already carries its provider prefix, ``_get_potential_model_names``
+    only ever tries ``model`` itself, so prefixing a second time writes a key
+    (e.g. ``openai/openai/kimi-k3`` for model=``openai/kimi-k3`` +
+    custom_llm_provider=``openai``) that no lookup can read — the deployment's
+    mode and cache pricing then silently never apply.
+    """
+    if custom_llm_provider is None or model.startswith(f"{custom_llm_provider}/"):
+        return model
+    return f"{custom_llm_provider}/{model}"
+
+
 def _get_max_position_embeddings(model_name: str) -> int | None:
     # Construct the URL for the config.json file
     config_url: Final = f"https://huggingface.co/{model_name}/raw/main/config.json"

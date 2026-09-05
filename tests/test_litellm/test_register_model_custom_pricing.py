@@ -993,3 +993,28 @@ def test_completion_cost_applies_off_peak_only_deployment_pricing():
     finally:
         _restore_model_cost_entries(original_entries)
         del router
+
+
+def test_per_request_custom_pricing_uses_the_key_lookup_uses():
+    """custom-aigw: the direct-SDK shared key must not double the provider prefix.
+
+    ``_register_custom_pricing_for_request`` built ``f"{provider}/{model}"``
+    unconditionally, so a provider-prefixed model wrote pricing to
+    ``openai/openai/...`` where no cost lookup reads it.
+    """
+    from litellm.main import _register_custom_pricing_for_request
+
+    keys = ("openai/gpt-prefix-pricing-test", "openai/openai/gpt-prefix-pricing-test")
+    original_entries = _snapshot_model_cost_entries(keys)
+    try:
+        _register_custom_pricing_for_request(
+            model="openai/gpt-prefix-pricing-test",
+            custom_llm_provider="openai",
+            kwargs={"input_cost_per_token": 0.000123, "output_cost_per_token": 0.000456},
+            model_info=None,
+        )
+
+        assert "openai/openai/gpt-prefix-pricing-test" not in litellm.model_cost
+        assert litellm.model_cost["openai/gpt-prefix-pricing-test"]["input_cost_per_token"] == 0.000123
+    finally:
+        _restore_model_cost_entries(original_entries)
