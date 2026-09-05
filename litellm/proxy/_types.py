@@ -5256,3 +5256,12 @@ class CostEstimateResponse(LiteLLMPydanticObjectBase):
     cache_creation_input_token_cost: float | None = Field(default=None, description="Rate billed per cache-write token")
     output_cost_per_reasoning_token: float | None = Field(default=None, description="Rate billed per reasoning token")
     provider: str | None = None
+
+
+class ResetCircuitBreakerResponse(BaseModel):
+    """Response model for /reset endpoint (custom-aigw fork)."""
+
+    status: str
+    message: str
+    cooldowns_cleared: int
+    failed_call_counters_cleared: int
