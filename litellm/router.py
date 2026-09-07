@@ -191,6 +191,9 @@ from litellm.router_utils.pre_call_checks.deployment_affinity_check import (
     DeploymentAffinityCheck,
     warn_on_unknown_model_group_affinity_flags,
 )
+from litellm.router_utils.pre_call_checks.constraint_capability_check import (
+    ConstraintCapabilityCheck,
+)
 from litellm.router_utils.pre_call_checks.io_token_rate_limit_check import (
     build_io_token_rate_limit_headers,
     deployment_has_io_token_limits,
@@ -1146,6 +1149,11 @@ class Router:
         # flags all False) so per-group config can activate affinity per model group.
         if self.model_group_affinity_config:
             self._ensure_deployment_affinity_callback()
+
+        # Constraint-capability routing filter (issue #11): active for every Router
+        # instance. Zero-impact unless a deployment declares litellm_params
+        # .capabilities; env CONSTRAINT_ROUTING_DISABLED is the kill switch.
+        self._ensure_constraint_capability_callback()
 
         if self.alerting_config is not None:
             self._initialize_alerting()
@@ -2175,6 +2183,24 @@ class Router:
         )
         self.optional_callbacks.append(affinity_callback)
         litellm.logging_callback_manager.add_litellm_callback(affinity_callback)
+
+    def _ensure_constraint_capability_callback(self) -> None:
+        """Register the ConstraintCapabilityCheck callback if absent.
+
+        Follows `_ensure_deployment_affinity_callback`, but dedupes on the global
+        `litellm.callbacks` list: the filter is stateless, so a single instance is
+        correct process-wide even when multiple Router instances are constructed.
+        """
+        if any(
+            isinstance(cb, ConstraintCapabilityCheck)
+            for cb in (litellm.callbacks or [])
+        ):
+            return
+        if self.optional_callbacks is None:
+            self.optional_callbacks = []
+        constraint_callback: Final = ConstraintCapabilityCheck()
+        self.optional_callbacks.append(constraint_callback)
+        litellm.logging_callback_manager.add_litellm_callback(constraint_callback)
 
     def add_optional_pre_call_checks(self, optional_pre_call_checks: OptionalPreCallChecks | None):
         if optional_pre_call_checks is None:
