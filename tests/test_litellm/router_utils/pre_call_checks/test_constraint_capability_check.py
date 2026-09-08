@@ -48,6 +48,17 @@ def _deployment(name: str, capabilities: str | None = None) -> dict:
         ({"reasoning": {"effort": "xhigh"}}, True),
         ({"reasoning": {"effort": "none"}}, False),
         ({"reasoning": {}}, False),
+        # output_config.effort(adaptive 载体;生产漏洞形状——Claude Code/omp 不带 thinking 块)
+        ({"output_config": {"effort": "low"}}, True),
+        ({"output_config": {"effort": "max"}}, True),
+        ({"output_config": {"effort": "xhigh"}}, True),
+        ({"output_config": {"effort": "none"}}, False),
+        ({"output_config": {"effort": ""}}, False),
+        ({"output_config": {}}, False),
+        ({"output_config": {"format": {"type": "json_schema"}}}, False),  # 结构化输出 ≠ thinking
+        ({"output_config": "bogus"}, False),
+        # 组合:无 effort 的 output_config + 无 thinking → False
+        ({"output_config": {"format": {"type": "json_schema"}}, "tool_choice": {"type": "any"}}, False),
         # 无约束
         ({}, False),
         ({"messages": [{"role": "user", "content": "hi"}]}, False),
@@ -116,6 +127,9 @@ THINKING_FORCED_REQUESTS = [
     {"reasoning_effort": "high", "tool_choice": "required"},
     # /v1/responses
     {"reasoning": {"effort": "max"}, "tool_choice": {"type": "function", "function": {"name": "f"}}},
+    # 生产漏洞形状(2026-09-08 omp 真实流量):无 thinking 块,output_config.effort + 强制 _think
+    {"output_config": {"effort": "low"}, "tool_choice": {"type": "tool", "name": "_think"}},
+    {"output_config": {"effort": "low"}, "tool_choice": {"type": "function", "function": {"name": "_think"}}},
 ]
 
 
@@ -147,6 +161,8 @@ async def test_active_rule_keeps_only_capable_survivors(request_kwargs):
         {"tool_choice": "required"},
         {"thinking": {"type": "disabled"}, "tool_choice": "required"},
         {"reasoning_effort": "none", "tool_choice": {"type": "any"}},
+        # output_config 仅 format(结构化输出)≠ thinking → forced 也不过滤
+        {"output_config": {"format": {"type": "json_schema"}}, "tool_choice": "required"},
         # 无约束
         {},
     ],
