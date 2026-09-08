@@ -33,6 +33,10 @@ Runtime key paths (resolved empirically on rebase-2026-09 @ 16da628b78, TBD-①)
   (`_target_declares_reasoning_effort` in the same transformation).
 - `/v1/chat/completions`: top-level `reasoning_effort`; forced forms as above.
 - `/v1/responses`: `reasoning.effort`; forced forms as above.
+- Any protocol: `output_config.effort` (adaptive-thinking carrier) counts as
+  thinking ON — Claude Code/omp send it WITHOUT a `thinking` block, and it
+  passes through untranslated to anthropic-native targets (production leak
+  2026-09-08: forced `_think` tool + `output_config.effort=low` → native 400s).
 Anthropic tool_choice forms (`{"type":"tool"|"any"}`) are accepted defensively for
 any path that bypasses the adapter translation.
 """
@@ -74,6 +78,14 @@ def _is_thinking_on(request_kwargs: dict[str, Any]) -> bool:
     reasoning = request_kwargs.get("reasoning")
     if isinstance(reasoning, dict):
         effort = reasoning.get("effort")
+        if isinstance(effort, str) and effort.lower() not in _EFFORT_OFF_VALUES:
+            return True
+    # Adaptive-thinking 通道(生产实证漏洞形状):omp/Claude Code 对 adaptive 模型
+    # 只发 output_config.effort 不带 thinking 块;对 anthropic 原生目标原样透传上
+    # wire(ANTHROPIC_ONLY_REQUEST_KEYS),上游据此判定 thinking 开启。
+    output_config = request_kwargs.get("output_config")
+    if isinstance(output_config, dict):
+        effort = output_config.get("effort")
         if isinstance(effort, str) and effort.lower() not in _EFFORT_OFF_VALUES:
             return True
     return False
