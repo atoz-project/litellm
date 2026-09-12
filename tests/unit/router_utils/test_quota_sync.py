@@ -48,6 +48,14 @@ RESET_5H = NOW + 3600  # 5h window resets in 1h
 RESET_WEEK = NOW + 7200  # weekly resets later
 
 
+@pytest.fixture(autouse=True)
+def _default_no_canary():
+    """Existing tests predate the canary gate: default to "no canary registered"
+    so exhausted-usages tests keep trusting usages. Canary tests patch their own."""
+    with patch("litellm.router_utils.quota_sync.match_canary", return_value=None):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # payload parsing
 # ---------------------------------------------------------------------------
@@ -378,3 +386,81 @@ def test_unblock_deletes_cooldown_cache_key():
     key = CooldownCache.get_cooldown_cache_key(model_id)
     assert key == f"deployment:{model_id}:cooldown"
     assert router.cooldown_cache.cooldown_store.get_cache(key) is not None
+
+
+class TestSyncDeploymentQuotaCanary:
+    """Canary gate (2026-09-12): usages claiming exhaustion must be confirmed by a
+    real 1-token request — Kimi's weekly counter lies for accounts holding a
+    (disabled) booster wallet (kimi-2/k3_2 production false positive)."""
+
+    @staticmethod
+    def _exhausted_dims():
+        return parse_kimi_usages(
+            _payload(
+                weekly={"used": "100", "limit": "100", "resetTime": _iso(RESET_WEEK)},
+                five_hour={"limit": "100", "remaining": "100", "resetTime": _iso(RESET_5H)},
+            )
+        )
+
+    async def test_canary_veto_prevents_cooldown(self):
+        """usages says weekly-exhausted but the canary succeeds → do NOT cool."""
+        router = _make_router()
+        model_id = router.get_model_ids()[0]
+        probe = AsyncMock(return_value=self._exhausted_dims())
+        canary = AsyncMock(return_value=True)
+        with patch("litellm.router_utils.quota_sync.match_probe", return_value=probe), patch(
+            "litellm.router_utils.quota_sync.match_canary", return_value=canary
+        ):
+            action = await sync_deployment_quota(router, model_id)
+        assert action == "ok"
+        assert _get_cooldown_value(router, model_id) is None
+        # canary received the provider-stripped model name
+        assert canary.await_args[0][2] == "k3"
+
+    async def test_canary_veto_unblocks_mis_cooled_deployment(self):
+        """A wrongly-cooled healthy leg gets unblocked on the next loop pass."""
+        router = _make_router()
+        model_id = router.get_model_ids()[0]
+        router.cooldown_cache.add_deployment_to_cooldown(
+            model_id=model_id,
+            original_exception=Exception("quota-sync: periodic quota exhausted (usages probe)"),
+            exception_status=429,
+            cooldown_time=3600,
+        )
+        assert _get_cooldown_value(router, model_id) is not None
+        probe = AsyncMock(return_value=self._exhausted_dims())
+        canary = AsyncMock(return_value=True)
+        with patch("litellm.router_utils.quota_sync.match_probe", return_value=probe), patch(
+            "litellm.router_utils.quota_sync.match_canary", return_value=canary
+        ):
+            action = await sync_deployment_quota(router, model_id)
+        assert action == "unblock"
+        assert _get_cooldown_value(router, model_id) is None
+
+    async def test_canary_confirms_wall_cools(self):
+        """usages exhausted + canary 403 → cool with resetTime-derived TTL."""
+        router = _make_router()
+        model_id = router.get_model_ids()[0]
+        probe = AsyncMock(return_value=self._exhausted_dims())
+        canary = AsyncMock(return_value=False)
+        with patch("litellm.router_utils.quota_sync.match_probe", return_value=probe), patch(
+            "litellm.router_utils.quota_sync.match_canary", return_value=canary
+        ):
+            action = await sync_deployment_quota(router, model_id)
+        assert action == "cooldown"
+        value = _get_cooldown_value(router, model_id)
+        assert value is not None
+        assert value["cooldown_time"] == pytest.approx(RESET_WEEK + QUOTA_RESET_BUFFER_SECONDS - time.time(), abs=5)
+
+    async def test_canary_inconclusive_trusts_usages(self):
+        """Canary network error → fall back to the usages verdict (still cool)."""
+        router = _make_router()
+        model_id = router.get_model_ids()[0]
+        probe = AsyncMock(return_value=self._exhausted_dims())
+        canary = AsyncMock(return_value=None)
+        with patch("litellm.router_utils.quota_sync.match_probe", return_value=probe), patch(
+            "litellm.router_utils.quota_sync.match_canary", return_value=canary
+        ):
+            action = await sync_deployment_quota(router, model_id)
+        assert action == "cooldown"
+        assert _get_cooldown_value(router, model_id) is not None
