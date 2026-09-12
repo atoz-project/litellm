@@ -250,7 +250,9 @@ async def _reconcile_deployment_cooldown(
     # all dimensions recovered: actively unblock if currently cooling down
     active = await cooldown_cache.async_get_active_cooldowns(model_ids=[model_id], parent_otel_span=None)
     if active:
-        await cooldown_cache.cache.async_delete_cache(CooldownCache.get_cooldown_cache_key(model_id))
+        # upstream 1.102: cooldown entries live in ``cooldown_store`` (its own
+        # DualCache), not the router-wide ``cache`` — deleting there is a no-op.
+        await cooldown_cache.cooldown_store.async_delete_cache(CooldownCache.get_cooldown_cache_key(model_id))
         verbose_router_logger.info(
             "quota_sync: model_id=%s %s action=unblock",
             model_id,

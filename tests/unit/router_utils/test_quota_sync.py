@@ -377,4 +377,4 @@ def test_unblock_deletes_cooldown_cache_key():
     )
     key = CooldownCache.get_cooldown_cache_key(model_id)
     assert key == f"deployment:{model_id}:cooldown"
-    assert router.cooldown_cache.cache.get_cache(key) is not None
+    assert router.cooldown_cache.cooldown_store.get_cache(key) is not None
