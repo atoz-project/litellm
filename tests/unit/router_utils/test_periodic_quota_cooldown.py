@@ -222,3 +222,40 @@ async def test_plain_errors_not_cooled():
     assert spy.call_count == 0
     # no quota marker -> no usages probe
     assert probe_spy.await_count == 0
+
+
+# 2026-09 Kimi weekly wording drift — verbatim production error (403).
+_KIMI_WEEKLY_403_CURRENT = (
+    "Failed to authenticate. API Error: 403 You've reached your weekly (7-day) "
+    "usage limit. Your quota will reset when the current 7-day window ends. "
+    "To continue now, purchase extra usage or upgrade your plan: "
+    "https://www.kimi.com/membership/subscription?tab=quota"
+)
+
+
+def test_current_weekly_wording_matches():
+    """Kimi's current weekly wall (2026-09) must open the quota gate.
+
+    Regression: the marker tuple only carried the pre-drift phrases, so the
+    live 403 never matched and the deployment was never cooled.
+    """
+    assert _is_periodic_quota_error(_KIMI_WEEKLY_403_CURRENT) is True
+    assert (
+        _is_cooldown_required(
+            litellm_router_instance=MagicMock(),
+            model_id="dep-1",
+            exception_status=403,
+            exception_str=_KIMI_WEEKLY_403_CURRENT,
+        )
+        is True
+    )
+    # wrapped/status-less shape (OpenAI-compatible surfaces) — veto bypassed too
+    assert (
+        _is_cooldown_required(
+            litellm_router_instance=MagicMock(),
+            model_id="dep-1",
+            exception_status=500,
+            exception_str="litellm.APIConnectionError: " + _KIMI_WEEKLY_403_CURRENT,
+        )
+        is True
+    )
