@@ -67,7 +67,8 @@
 - [x] anthropic adapters + messages handler + passthrough logging: 339 passed
 - [x] ops regression `test_effort_max_passthrough.py` (PYTHONPATH=../litellm): 30 passed
 - [x] PRE(v20260912-1528, 2026-09-12):健康/普通/流式/effort=max//v1/messages+thinking 全 200;约束组合干净 400;SLS 仅公网扫描器噪音;ENI 收敛;**金丝雀实证:k3_2(usages 撒谎的健康腿)16:17 自动解禁回池**。
-- [ ] **Live gateway (release 验收时复核):** (a) /reset actually clears allowed_fails
+- [x] **release(v20260912-1528, 2026-09-12 18:36 切流 blue→green,全绿)**:健康/普通/effort=max//v1/messages+thinking 全 200;约束组合干净 400;SLS 净窗口零异常 Traceback;**生产实证:金丝雀解禁 k3_2(其健康窗口期),k3_2 真撞墙后 marker 新文案(PermissionDeniedError + "weekly (7-day) usage limit")立即冷却**——撞墙冷却与金丝雀否决两条腿都在生产被验证。/reset 新 keying 留待下次真实操作验证。
+- [ ] ~~Live gateway (release 验收时复核):~~ (a) /reset actually clears allowed_fails
   counters + cooldowns on the new keying (probe: cool a deployment, /reset, confirm
   immediate re-pick); (b) Kimi weekly-403 marker now cools + quota_sync unblocks on
   recovery (next real wall-hit); (c) per-deployment responses-routing precedence
