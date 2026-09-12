@@ -66,7 +66,8 @@
 - [x] test_websearch_enabled_models.py + test_aliyun_iqs_search.py + test_constraint_capability_check.py: 80 passed
 - [x] anthropic adapters + messages handler + passthrough logging: 339 passed
 - [x] ops regression `test_effort_max_passthrough.py` (PYTHONPATH=../litellm): 30 passed
-- [ ] **Live gateway (post-deploy gates):** (a) /reset actually clears allowed_fails
+- [x] PRE(v20260912-1528, 2026-09-12):健康/普通/流式/effort=max//v1/messages+thinking 全 200;约束组合干净 400;SLS 仅公网扫描器噪音;ENI 收敛;**金丝雀实证:k3_2(usages 撒谎的健康腿)16:17 自动解禁回池**。
+- [ ] **Live gateway (release 验收时复核):** (a) /reset actually clears allowed_fails
   counters + cooldowns on the new keying (probe: cool a deployment, /reset, confirm
   immediate re-pick); (b) Kimi weekly-403 marker now cools + quota_sync unblocks on
   recovery (next real wall-hit); (c) per-deployment responses-routing precedence
