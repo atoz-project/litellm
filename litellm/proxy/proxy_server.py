@@ -18776,7 +18776,9 @@ async def reset_circuit_breaker(
     # Clear cooldown entries from DualCache (both in-memory and Redis)
     cooldown_cache = getattr(llm_router, "cooldown_cache", None)
     if cooldown_cache is not None:
-        dual_cache = getattr(cooldown_cache, "cache", None)
+        # upstream 1.102: cooldown entries live in ``cooldown_store`` (its own
+        # DualCache with lazily-attached Redis), not the router-wide ``cache``.
+        dual_cache = getattr(cooldown_cache, "cooldown_store", None) or getattr(cooldown_cache, "cache", None)
         if dual_cache is not None:
             # Iterate all deployments and delete their cooldown keys
             model_list = getattr(llm_router, "model_list", [])
@@ -18803,33 +18805,49 @@ async def reset_circuit_breaker(
                     f"Failed to flush CooldownCache in_memory_cache: {e}"
                 )
 
-    # Clear failed_calls counters
-    failed_calls = getattr(llm_router, "failed_calls", None)
-    if failed_calls is not None:
-        dual_cache_fc = getattr(failed_calls, "cache", None)
-        if dual_cache_fc is not None:
-            model_list = getattr(llm_router, "model_list", [])
-            for model_dict in model_list:
-                model_info = model_dict.get("model_info", {})
-                model_id = model_info.get("id")
-                if model_id:
-                    try:
-                        await dual_cache_fc.async_delete_cache(key=model_id)
-                        counters_cleared += 1
-                    except Exception as e:
-                        verbose_proxy_logger.warning(
-                            f"Failed to clear failed_calls counter for {model_id}: {e}"
-                        )
-        else:
-            in_mem_fc = getattr(failed_calls, "in_memory_cache", failed_calls)
-            if in_mem_fc is not None:
+    # Clear allowed-fails counters.
+    # Upstream (1.102) stores them in the router's shared DualCache under
+    # ``deployment:{model_id}:allowed_fails[:{suffix}]`` where suffix is
+    # "generic" or the concrete exception class name (see
+    # cooldown_handlers.should_cooldown_based_on_allowed_fails_policy).
+    # The old ``Router.failed_calls`` cache no longer exists upstream.
+    shared_cache = getattr(llm_router, "cache", None)
+    if shared_cache is not None:
+        counter_suffixes = (
+            None,  # base key
+            "generic",
+            "ContentPolicyViolationError",
+            "BadRequestError",
+            "AuthenticationError",
+            "Timeout",
+            "RateLimitError",
+            "InternalServerError",
+            "ServiceUnavailableError",
+            "BadGatewayError",
+            "NotFoundError",
+        )
+        model_list = getattr(llm_router, "model_list", [])
+        for model_dict in model_list:
+            model_info = model_dict.get("model_info", {})
+            model_id = model_info.get("id")
+            if not model_id:
+                continue
+            for suffix in counter_suffixes:
+                counter_key = (
+                    f"deployment:{model_id}:allowed_fails:{suffix}"
+                    if suffix
+                    else f"deployment:{model_id}:allowed_fails"
+                )
                 try:
-                    in_mem_fc.flush_cache()
-                    counters_cleared = len(getattr(llm_router, "model_list", []))
+                    await shared_cache.async_delete_cache(key=counter_key)
+                    counters_cleared += 1
                 except Exception as e:
                     verbose_proxy_logger.warning(
-                        f"Failed to flush failed_calls cache: {e}"
+                        f"Failed to clear allowed_fails counter {counter_key}: {e}"
                     )
+        # ponytail: counters keyed by a subclassed exception name not listed
+        # above survive a reset; worst case the deployment cools down again
+        # sooner. Enumerate subclasses too if that ever matters.
 
     return ResetCircuitBreakerResponse(
         status="ok",
