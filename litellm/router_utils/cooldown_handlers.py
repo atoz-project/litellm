@@ -51,6 +51,12 @@ from litellm.router_utils.quota_sync import QUOTA_BLIND_COOLDOWN_SECONDS, sync_d
 _PERIODIC_QUOTA_MARKERS: Final = (
     "usage limit for this billing cycle",
     "usage limit for this period",
+    # 2026-09 Kimi wording drift (observed live): the weekly wall now reads
+    # "You've reached your weekly (7-day) usage limit. ... https://www.kimi.com/
+    # membership/subscription?tab=quota" — neither legacy phrase appears. The
+    # upsell-link fingerprint is the stable part; keep the literal phrase too.
+    "weekly (7-day) usage limit",
+    "membership/subscription",
 )
 
 
