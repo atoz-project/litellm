@@ -194,68 +194,6 @@ def match_probe(api_base: str | None) -> Callable[[str, str], Awaitable[list[Quo
 
 
 # ---------------------------------------------------------------------------
-# Canary: real-request confirmation before trusting a usages "exhausted" claim
-# ---------------------------------------------------------------------------
-async def kimi_canary(api_base: str, api_key: str, model: str) -> bool | None:
-    """POST a 1-token /v1/messages to decide whether the account is really walled.
-
-    Returns True (request succeeded — usages counter is lying, do NOT cool),
-    False (403/429 — genuinely walled), None (inconclusive: network/parse error —
-    caller falls back to trusting usages).
-
-    custom-aigw 2026-09-12: Kimi's weekly counter reports 100/100 for accounts
-    holding a (disabled) booster wallet while requests still succeed — cooling on
-    the counter alone wrongly parked a healthy leg until resetTime (kimi-2/k3_2
-    production false positive). The canary costs ~1 token and only runs when
-    usages already claims exhaustion, so truly-walled keys answer 403 (no spend).
-    """
-    url = api_base.rstrip("/") + "/v1/messages"
-    try:
-        async with httpx.AsyncClient(timeout=QUOTA_PROBE_TIMEOUT_SECONDS, trust_env=False) as client:
-            response = await client.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "max_tokens": 1,
-                    "stream": False,
-                    "messages": [{"role": "user", "content": "ping"}],
-                },
-            )
-    except Exception:
-        return None
-    if response.status_code in (403, 429):
-        return False
-    if 200 <= response.status_code < 300:
-        return True
-    return None
-
-
-QUOTA_CANARIES: Final[dict[str, Callable[[str, str, str], Awaitable[bool | None]]]] = {
-    "api.kimi.com": kimi_canary,
-}
-
-
-def match_canary(api_base: str | None) -> Callable[[str, str, str], Awaitable[bool | None]] | None:
-    """Return the canary whose registry host fragment appears in api_base's host."""
-    if not api_base:
-        return None
-    try:
-        host = urlparse(api_base).hostname or ""
-    except ValueError:
-        return None
-    for fragment, canary in QUOTA_CANARIES.items():
-        if fragment in host:
-            return canary
-    return None
-
-
-# ---------------------------------------------------------------------------
 # Cooldown reconciliation (shared by the loop and the wall-hit path)
 # ---------------------------------------------------------------------------
 def _cooldown_ttl_from_dims(dims: list[QuotaDimension], now: float) -> float | None:
@@ -359,27 +297,6 @@ async def sync_deployment_quota(litellm_router_instance: LitellmRouter, model_id
         # empty/malformed payload: treat like a probe failure, change nothing
         verbose_router_logger.info("quota_sync: model_id=%s probe-failed err=empty-payload action=none", model_id)
         return "probe-failed"
-    # Canary veto: usages claims exhaustion but a real 1-token request succeeds
-    # → the counter is lying (Kimi accounts holding a booster wallet), so clear
-    # the exhausted flags and let reconciliation unblock/ok instead of cooling.
-    if any(d["exhausted"] for d in dims):
-        canary = match_canary(api_base)
-        if canary is not None:
-            model = deployment.litellm_params.model or ""
-            model = model.split("/", 1)[-1]  # strip provider prefix (anthropic/k3 → k3)
-            try:
-                healthy = await canary(api_base, api_key, model)
-            except Exception:
-                healthy = None
-            if healthy is True:
-                verbose_router_logger.info(
-                    "quota_sync: model_id=%s canary-veto usages-says-exhausted but real request 200", model_id
-                )
-                dims = [{**d, "exhausted": False} for d in dims]
-            elif healthy is None:
-                verbose_router_logger.info(
-                    "quota_sync: model_id=%s canary-inconclusive, trusting usages", model_id
-                )
     return await _reconcile_deployment_cooldown(litellm_router_instance, model_id, dims)
 
 
