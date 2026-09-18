@@ -157,6 +157,7 @@ from litellm.router_utils.auto_router_tuning_baseline import (
     tuning_limit_violation,
 )
 from litellm.router_utils.common_utils import resolve_model_group_alias
+from litellm.router_utils.reasoning_effort_capability import CAPABILITY_MODEL_INFO_KEYS
 from litellm.router_utils.routing_groups import parse_routing_groups
 from litellm.types.caching import RedisPipelineIncrementOperation
 from litellm.types.utils import (
@@ -14743,6 +14744,25 @@ async def get_all_team_and_direct_access_models(
     return _filter_models_to_user_accessible(all_models)
 
 
+def _overlay_litellm_model_info(model_info: dict, litellm_model_info: Mapping[str, Any]) -> dict:
+    """Fill unset model_info keys from the litellm catalog entry.
+
+    Reasoning-effort capability keys are exempt on DB-stored deployments
+    (db_model=True): the operator's stored declaration owns that card outright, so
+    neither the built-in bare-name entry nor a stale in-memory registration
+    (register_model merges and never removes keys) may resurrect a flag the
+    declaration dropped. config.yaml models keep the vanilla fill.
+    """
+    skip_capability_keys: Final = model_info.get("db_model") is True
+    for k, v in litellm_model_info.items():
+        if k in model_info:
+            continue
+        if skip_capability_keys and k in CAPABILITY_MODEL_INFO_KEYS:
+            continue
+        model_info[k] = v
+    return model_info
+
+
 def _enrich_model_info_with_litellm_data(
     model: dict[str, Any], debug: bool = False, llm_router: Router | None = None
 ) -> dict[str, Any]:
@@ -14802,13 +14822,29 @@ def _enrich_model_info_with_litellm_data(
     stamped_model_info: Final = MappingProxyType(
         {**model_info, **_pricing_override_stamps(model_info, model.get("litellm_params") or MappingProxyType({}))}
     )
+    overlay_source: Final = MappingProxyType({**litellm_model_info, **discovered_model_info})
+    # custom-aigw: the fill goes through _overlay_litellm_model_info so capability keys
+    # stay operator-authoritative on DB rows — neither the catalog entry nor the
+    # discovered (in-memory, merge-only) registration may resurrect a dropped flag.
+    filled: Final = _overlay_litellm_model_info(dict(stamped_model_info), overlay_source)
+    skip_capability_keys: Final = model_info.get("db_model") is True
     model["model_info"] = {
-        **stamped_model_info,
-        **{
-            k: None if unpriced and k in ("input_cost_per_token", "output_cost_per_token") else v
-            for k, v in MappingProxyType({**litellm_model_info, **discovered_model_info}).items()
-            if k not in stamped_model_info or (stamped_model_info[k] is None and k in discovered_model_info)
-        },
+        k: (
+            None
+            if unpriced
+            and k in ("input_cost_per_token", "output_cost_per_token")
+            and k in overlay_source
+            and k not in stamped_model_info
+            else (
+                discovered_model_info[k]
+                if k in stamped_model_info
+                and stamped_model_info[k] is None
+                and k in discovered_model_info
+                and not (skip_capability_keys and k in CAPABILITY_MODEL_INFO_KEYS)
+                else v
+            )
+        )
+        for k, v in filled.items()
     }
     # don't return the api key / vertex credentials
     # don't return the llm credentials

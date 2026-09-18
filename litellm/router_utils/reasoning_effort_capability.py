@@ -49,6 +49,15 @@ _OPT_OUT_EFFORTS: Final = ("minimal", "low")
 _OPT_IN_EFFORTS: Final = ("xhigh", "max")
 _UNCONDITIONAL_EFFORTS: Final = frozenset(("medium", "high"))
 
+# The model_info keys an operator declaration owns outright. The management plane treats
+# them as replace semantics on update (a patch that omits one drops it from the stored
+# blob) and never overlays catalog or in-memory-registered values onto a DB-declared row
+# on /model/info reads, so a retired flag cannot linger after its declaration is gone.
+# Pure data: nothing on the request path reads this set.
+CAPABILITY_MODEL_INFO_KEYS: Final = frozenset(
+    {flag for _, flag in _EFFORT_FLAGS} | {"supports_reasoning", _DECLARED_EFFORTS_KEY}
+)
+
 
 def _bare_model_entry(model_info: Mapping[str, object]) -> Mapping[str, object]:
     """The unprefixed twin of a provider-prefixed map entry, which is where the flags often live:

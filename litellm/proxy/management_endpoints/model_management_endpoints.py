@@ -138,6 +138,7 @@ from litellm.router_utils.auto_router_model_naming import (
     validate_strategy_router_model_write,
 )
 from litellm.router_utils.auto_router_tuning_baseline import is_mutable_tuned_candidate, tuning_quota_violation
+from litellm.router_utils.reasoning_effort_capability import CAPABILITY_MODEL_INFO_KEYS
 from litellm.types.llms.base import LiteLLMBaseModel
 from litellm.types.llms.bedrock import AwsSessionTag
 from litellm.types.proxy.management_endpoints.model_management_endpoints import (
@@ -1077,6 +1078,16 @@ def update_db_model(
         for k in echoed_fields:
             if k in merged_model_info and merged_model_info[k] != incoming_model_info[k]:
                 del merged_model_info[k]
+        # custom-aigw: Reasoning-effort capability keys are operator-authoritative: a
+        # model_info payload REPLACES the stored capability subset rather than merging
+        # into it, so a key the declaration no longer carries is dropped from storage.
+        # Plain merge here is what let boolean-era supports_*_reasoning_effort flags
+        # outlive their declarations (no explicit-null path exists for them outside
+        # SPECIAL_MODEL_INFO_PARAMS, which stays pricing-only). A patch with no
+        # model_info at all leaves the stored capability keys untouched.
+        for field in CAPABILITY_MODEL_INFO_KEYS:
+            if field not in incoming_model_info:
+                merged_model_info.pop(field, None)
 
     # Honor explicit-null clears LAST, after both merges, so a model_info blob a client
     # passes through cannot silently undo a litellm_params clear via .update().
