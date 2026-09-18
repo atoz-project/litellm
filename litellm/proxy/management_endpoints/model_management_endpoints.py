@@ -111,6 +111,7 @@ from litellm.router_utils.auto_router_model_naming import (
     validate_strategy_router_model_write,
 )
 from litellm.router_utils.auto_router_tuning_baseline import is_mutable_tuned_candidate, tuning_quota_violation
+from litellm.router_utils.reasoning_effort_capability import CAPABILITY_MODEL_INFO_KEYS
 from litellm.types.llms.bedrock import AwsSessionTag
 from litellm.types.proxy.management_endpoints.model_management_endpoints import (
     AutoRouterClassifierDefaultPromptResponse,
@@ -747,7 +748,18 @@ def update_db_model(db_model: Deployment, updated_patch: updateDeployment) -> Pr
 
     # update model info
     if updated_patch.model_info:
-        merged_model_info.update(updated_patch.model_info.model_dump(exclude_none=True))
+        declared_model_info: Final[dict[str, object]] = updated_patch.model_info.model_dump(exclude_none=True)
+        merged_model_info.update(declared_model_info)
+        # Reasoning-effort capability keys are operator-authoritative: a model_info
+        # payload REPLACES the stored capability subset rather than merging into it, so
+        # a key the declaration no longer carries is dropped from storage. Plain merge
+        # here is what let boolean-era supports_*_reasoning_effort flags outlive their
+        # declarations (no explicit-null path exists for them outside
+        # SPECIAL_MODEL_INFO_PARAMS, which stays pricing-only). A patch with no
+        # model_info at all leaves the stored capability keys untouched.
+        for field in CAPABILITY_MODEL_INFO_KEYS:
+            if field not in declared_model_info:
+                merged_model_info.pop(field, None)
 
     # Honor explicit-null clears LAST, after both merges, so a model_info blob the UI
     # passes through (which today re-sends the OLD pricing on every save) cannot

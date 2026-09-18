@@ -144,6 +144,7 @@ from litellm.router_utils.auto_router_tuning_baseline import (
     snapshot_tuning_baselines,
     tuning_limit_violation,
 )
+from litellm.router_utils.reasoning_effort_capability import CAPABILITY_MODEL_INFO_KEYS
 from litellm.types.caching import RedisPipelineIncrementOperation
 from litellm.types.utils import (
     ModelResponse,
@@ -13420,6 +13421,25 @@ async def get_all_team_and_direct_access_models(
     return _filter_models_to_user_accessible(all_models)
 
 
+def _overlay_litellm_model_info(model_info: dict, litellm_model_info: Mapping[str, Any]) -> dict:
+    """Fill unset model_info keys from the litellm catalog entry.
+
+    Reasoning-effort capability keys are exempt on DB-stored deployments
+    (db_model=True): the operator's stored declaration owns that card outright, so
+    neither the built-in bare-name entry nor a stale in-memory registration
+    (register_model merges and never removes keys) may resurrect a flag the
+    declaration dropped. config.yaml models keep the vanilla fill.
+    """
+    skip_capability_keys: Final = model_info.get("db_model") is True
+    for k, v in litellm_model_info.items():
+        if k in model_info:
+            continue
+        if skip_capability_keys and k in CAPABILITY_MODEL_INFO_KEYS:
+            continue
+        model_info[k] = v
+    return model_info
+
+
 def _enrich_model_info_with_litellm_data(
     model: dict[str, Any], debug: bool = False, llm_router: Router | None = None
 ) -> dict[str, Any]:
@@ -13472,9 +13492,7 @@ def _enrich_model_info_with_litellm_data(
                 litellm_model_info = litellm.get_model_info(model=litellm_model, custom_llm_provider=split_model[0])
             except Exception:
                 litellm_model_info = {}
-    for k, v in litellm_model_info.items():
-        if k not in model_info:
-            model_info[k] = v
+    model_info = _overlay_litellm_model_info(model_info, litellm_model_info)
     model["model_info"] = model_info
     # don't return the api key / vertex credentials
     # don't return the llm credentials
@@ -14938,9 +14956,7 @@ def _get_proxy_model_info(model: dict) -> dict:
             litellm_model_info = litellm.get_model_info(model=litellm_model, custom_llm_provider=split_model[0])
         except Exception:
             litellm_model_info = {}
-    for k, v in litellm_model_info.items():
-        if k not in model_info:
-            model_info[k] = v
+    model_info = _overlay_litellm_model_info(model_info, litellm_model_info)
     model["model_info"] = model_info
     # don't return the llm credentials
     model = remove_sensitive_info_from_deployment(deployment_dict=model, excluded_keys={"litellm_credential_name"})
