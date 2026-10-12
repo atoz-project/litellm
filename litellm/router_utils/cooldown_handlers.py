@@ -66,6 +66,15 @@ _PERIODIC_QUOTA_MARKERS: Final = (
     # upsell-link fingerprint is the stable part; keep the literal phrase too.
     "weekly (7-day) usage limit",
     "membership/subscription",
+    # 2026-10-12 Kimi wording drift (observed live): entitlement denial now
+    # reads "Your current subscription does not have access to Kimi Code right
+    # now. Upgrade your plan to keep coding with Kimi Code:
+    # https://www.kimi.com/code/#pricing" — none of the four legacy phrases
+    # appear. Semantic differs (account lost access, not weekly wall), but the
+    # handling is the same: stop hammering a dead subscription and let the
+    # usages probe/canary re-admit it if Kimi restores access.
+    "does not have access to kimi code",
+    "kimi.com/code",
 )
 
 
