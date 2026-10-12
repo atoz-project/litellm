@@ -32,6 +32,12 @@
    router.py 新增 `EncryptedContentAffinityCheck` pre-call check(共存)。
 8. 依赖面:venv 需 `uv sync` 重刷(mcp 新版带 CacheableResult 等);tests/unit
    conftest 新增 pytest-socket 依赖;prisma 需手动补装(同前轮,test-env only)。
+9. **ConfigRepository 删掉 `CONFIG_PARAMS` 白名单**(类仍在
+   `litellm/repositories/config_repository.py`,`get_all_params` 改走 find_many):
+   /config/get 与 /config/param 的 param_name 门禁失去判定表 → 生产 500
+   AttributeError(litellm-tf plan 读 router_settings 触发,release 验收实证)。
+   fork 回补类属性(带 custom-aigw 注释)+ 新增
+   `tests/unit/repositories/test_config_repository_params.py` 钉死。
 
 ## Patch disposition @1.106.0
 

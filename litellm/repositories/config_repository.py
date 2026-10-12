@@ -51,6 +51,15 @@ class ConfigParam:
 class ConfigRepository:
     """Repository for config database operations."""
 
+    # custom-aigw: upstream dropped this whitelist in 1.106; the fork's
+    # /config/get + /config/param endpoints still gate param_name on it.
+    CONFIG_PARAMS = [
+        "general_settings",
+        "router_settings",
+        "litellm_settings",
+        "environment_variables",
+    ]
+
     def __init__(self, prisma_client: PrismaClient | None, *, use_writer: bool = False):
         self._prisma_client: Final = prisma_client
         self._use_writer: Final = use_writer
