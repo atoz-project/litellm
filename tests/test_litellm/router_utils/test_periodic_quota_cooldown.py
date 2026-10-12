@@ -259,3 +259,31 @@ def test_current_weekly_wording_matches():
         )
         is True
     )
+
+
+# 2026-10-12 Kimi entitlement-denial wording — verbatim production error (403).
+_KIMI_ENTITLEMENT_403_CURRENT = (
+    'Failed to authenticate. API Error: 403 {"error":{"type":"permission_error",'
+    '"message":"Your current subscription does not have access to Kimi Code '
+    "right now. Upgrade your plan to keep coding with Kimi Code: "
+    'https://www.kimi.com/code/#pricing"},"type":"error"}'
+)
+
+
+def test_current_entitlement_wording_matches():
+    """Kimi's subscription-denial wall (2026-10) must open the quota gate.
+
+    Regression: second wording drift — the upsell link moved from
+    membership/subscription?tab=quota to kimi.com/code/#pricing, so all four
+    prior markers missed and k3 deployments were cooled as plain 403s.
+    """
+    assert _is_periodic_quota_error(_KIMI_ENTITLEMENT_403_CURRENT) is True
+    assert (
+        _is_cooldown_required(
+            litellm_router_instance=MagicMock(),
+            model_id="dep-1",
+            exception_status=403,
+            exception_str=_KIMI_ENTITLEMENT_403_CURRENT,
+        )
+        is True
+    )
