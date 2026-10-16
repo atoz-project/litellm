@@ -67,6 +67,16 @@
 **Rebase 修复(已 autosquash 回各属补丁):** router.py import @both 语法修复(96d3f126ef 系);
 fork 测试 experimental_pass_through → pass_through 导入随迁(a1f9ba0f02 系)。
 
+## Post-rebase additions
+
+- 2026-10-17 `daa350763e` **high 入 effort 降级链(high->medium)**:llama.cpp/vLLM
+  qwen3.8 heretic/flash-next 模板族只认 xhigh/medium/low,adaptive+effort=high 穿透抛
+  Jinja 500 → 单 deployment 冷却放大全组 429(office-gpu 事故)。有卡不含 high → 钳
+  medium;无卡/lookup miss 落链底 medium(裸 fork floor);网关 wrapper 对无意见
+  deployment 透传不变。测试:test_reasoning_effort_fields 无-high 卡参数化回归 +
+  test_handler_reasoning_effort_normalization 7 条旧 floor 钉死用例按新语义更新。
+  回归 pass_through+router_utils 2313 passed。下轮 rebase 携行(新补丁 #25)。
+
 ## Verification (2026-10-13, 本地 .venv,uv sync --frozen + proxy extras + prisma==0.11.0 + pytest-socket)
 
 - [x] 核心套件 271 passed:test_periodic_quota_cooldown / test_quota_sync /
