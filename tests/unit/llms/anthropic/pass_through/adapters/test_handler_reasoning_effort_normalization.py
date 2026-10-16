@@ -93,7 +93,10 @@ class TestTheSummaryWrappingOnlyRidesTheResponsesBridge:
         ],
     )
     def test_a_chat_target_gets_the_plain_tier(self, local_model_cost_map: None, model: str, provider: str) -> None:
-        assert _reasoning_effort_sent_for_thinking(model, provider, SUMMARIZED_THINKING) == "high"
+        # 2026-10-17 high 入降级链(high->medium):databricks-qwen35 registry 卡不含 high,
+        # clamp 到 medium;kimi-k3 卡含 high 保持 high 不变。
+        expected = "medium" if "qwen35" in model else "high"
+        assert _reasoning_effort_sent_for_thinking(model, provider, SUMMARIZED_THINKING) == expected
 
     def test_auto_summary_stays_a_plain_tier_on_a_chat_target(
         self, local_model_cost_map: None, monkeypatch: pytest.MonkeyPatch
@@ -102,7 +105,7 @@ class TestTheSummaryWrappingOnlyRidesTheResponsesBridge:
 
         sent = _reasoning_effort_sent_for_thinking("databricks/databricks-qwen35-122b-a10b", "databricks", PLAIN_THINKING)
 
-        assert sent == "high"
+        assert sent == "medium"  # 卡不含 high,high->medium(2026-10-17 链)
 
     @pytest.mark.parametrize(
         "model, provider",
@@ -115,7 +118,10 @@ class TestTheSummaryWrappingOnlyRidesTheResponsesBridge:
     def test_a_bridged_target_keeps_the_summary(self, local_model_cost_map: None, model: str, provider: str) -> None:
         sent = _reasoning_effort_sent_for_thinking(model, provider, SUMMARIZED_THINKING)
 
-        assert sent == {"effort": "high", "summary": "auto"}
+        # lookup miss(responses/ 前缀或 databricks 无前缀条目)时 high 落链底 medium(2026-10-17 链);
+        # 生产网关 wrapper 对无意见 deployment 透传原值(startup_patch),此 floor 仅约束裸 fork。
+        expected = "medium" if model != "gpt-5-mini" else "high"
+        assert sent == {"effort": expected, "summary": "auto"}
 
     def test_auto_summary_still_reaches_a_bridged_target(
         self, local_model_cost_map: None, monkeypatch: pytest.MonkeyPatch
@@ -124,7 +130,7 @@ class TestTheSummaryWrappingOnlyRidesTheResponsesBridge:
 
         sent = _reasoning_effort_sent_for_thinking("azure/responses/gpt-5-mini", "azure", PLAIN_THINKING)
 
-        assert sent == {"effort": "high", "summary": "detailed"}
+        assert sent == {"effort": "medium", "summary": "detailed"}  # lookup miss floor(同上注)
 
     @pytest.mark.parametrize(
         "api_base, expected",
@@ -150,7 +156,7 @@ class TestTheSummaryWrappingOnlyRidesTheResponsesBridge:
             "kimi-k3", None, SUMMARIZED_THINKING, api_base="https://api.together.xyz/v1"
         )
 
-        assert sent == "high"
+        assert sent == "medium"  # api_base 解析 provider 后条目 lookup miss,floor medium(2026-10-17 链)
 
     def test_a_chained_gateway_keeps_the_dict_for_its_own_bridge(self, local_model_cost_map: None) -> None:
         sent = _reasoning_effort_sent_for_thinking("litellm_proxy/gpt-5.4", "litellm_proxy", SUMMARIZED_THINKING)
