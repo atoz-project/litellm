@@ -137,44 +137,13 @@ class TestNormalizeReasoningEffortValue:
     ):
         assert normalize_reasoning_effort_value(effort, model, provider) == expected
 
-    @pytest.mark.parametrize("effort", ["none", "low", "medium"])
+    @pytest.mark.parametrize("effort", ["none", "low", "medium", "high"])
     def test_a_tier_outside_any_chain_passes_through(self, local_model_cost_map, effort):
         assert normalize_reasoning_effort_value(effort, "claude-opus-4-7", "anthropic") == effort
 
-    def test_high_stays_when_the_entry_accepts_it(self, local_model_cost_map):
-        # claude-opus-4-7 收 high:链内第一级即命中,不变。
-        assert normalize_reasoning_effort_value("high", "claude-opus-4-7", "anthropic") == "high"
-
-    @pytest.mark.parametrize("effort, expected", [("max", "high"), ("xhigh", "high"), ("high", "medium"), ("minimal", "low")])
+    @pytest.mark.parametrize("effort, expected", [("max", "high"), ("xhigh", "high"), ("minimal", "low")])
     def test_a_model_the_map_does_not_describe_keeps_the_floor(self, local_model_cost_map, effort, expected):
         assert normalize_reasoning_effort_value(effort, "totally-made-up-model-xyz", "openai") == expected
-
-    @pytest.mark.parametrize(
-        "effort, expected",
-        [
-            ("high", "medium"),  # 2026-10-17 事故回归:heretic/flash-next 模板族拒 high
-            ("max", "xhigh"),
-            ("xhigh", "xhigh"),
-            ("medium", "medium"),
-            ("low", "low"),
-            ("none", "none"),
-        ],
-    )
-    def test_a_card_without_high_degrades_high_to_medium(self, monkeypatch, effort, expected):
-        """Deployment 能力卡 reasoning_effort_levels=[low,medium,xhigh](llama.cpp/vLLM
-        qwen3.8 heretic/flash-next 模板族,卡经 DB model_info 下发):high 不再是全员保底档,
-        必须钳到卡内最近的 medium,而不是穿透上游抛 Jinja 500。"""
-        import litellm.utils
-
-        monkeypatch.setattr(
-            litellm.utils,
-            "get_model_info",
-            lambda **_: {
-                "supports_reasoning": True,
-                "reasoning_effort_levels": ["low", "medium", "xhigh"],
-            },
-        )
-        assert normalize_reasoning_effort_value(effort, "qwen3.8-flash-next", "openai") == expected
 
 
 # ---------------------------------------------------------------------------

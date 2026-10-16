@@ -18,10 +18,6 @@ _EFFORT_DEGRADATION_CHAIN: Final[Mapping[str, tuple[str, ...]]] = MappingProxyTy
     {
         "max": ("max", "xhigh", "high"),
         "xhigh": ("xhigh", "high"),
-        # 2026-10-17: "high" 不再视为全员保底档。llama.cpp/vLLM 的 qwen3.8 heretic/flash-next
-        # chat template 只认 xhigh/medium/low,high 触发模板 raise_exception 500(生产事故:
-        # 单 deployment 冷却放大成全组 429)。无卡 deployment 落 medium(最保守通用档)。
-        "high": ("high", "medium"),
         "minimal": ("minimal", "low"),
     }
 )
